@@ -239,6 +239,62 @@ def validate_plan(plan: object):
     return True, ""
 
 
+def _stringify_task_field(value: object) -> str:
+    if value is None:
+        return "(not specified)"
+    if isinstance(value, str):
+        return value if value.strip() else "(not specified)"
+    return json.dumps(value, indent=2)
+
+
+def render_manager_plan(plan: List[Dict[str, str]]) -> str:
+    rendered_tasks = []
+    for task in plan:
+        rendered_tasks.append(render_manager_task(task))
+    return "\n\n".join(rendered_tasks)
+
+
+def render_manager_task(task: Dict[str, object]) -> str:
+    preferred_order = [
+        "id",
+        "title",
+        "goal",
+        "user_requirement_trace",
+        "dependencies",
+        "interfaces",
+        "parameters",
+        "control_logic",
+        "datapath",
+        "state_registers",
+        "reset_clocking",
+        "behavior",
+        "edge_cases",
+        "acceptance_criteria",
+        "deliverable",
+        "notes",
+    ]
+    lines = []
+    for key in preferred_order:
+        if key in task:
+            lines.append(f"{key}: {_stringify_task_field(task.get(key))}")
+    for key, value in task.items():
+        if key not in preferred_order:
+            lines.append(f"{key}: {_stringify_task_field(value)}")
+    return "\n".join(lines)
+
+
+def current_manager_handoff(state: "AgentState") -> str:
+    task = current_manager_task(state)
+    return (
+        "Current task handoff from Manager:\n"
+        f"{render_manager_task(task)}\n\n"
+        "Original user requirement, authoritative source:\n"
+        f"{state['user_request']}\n\n"
+        "Full ordered Manager plan:\n"
+        f"{render_manager_plan(state['manager_plan'])}"
+    )
+
+
 def validate_generated_files(files: object):
     if not isinstance(files, list) or not files:
         return False, "Coding output must be a non-empty JSON list."
@@ -498,9 +554,17 @@ Read the user's requirement and split it into ordered implementation tasks.
 
 Rules:
 - Keep the plan incremental. Each task should build on previous RTL.
+- Preserve every concrete user requirement. Do not summarize away widths, protocols, timing, reset polarity, register behavior, names, or corner cases.
 - Include architecture, interfaces, datapath/control logic, reset behavior, and verification readiness when relevant.
+- Each task must be a complete handoff packet for the Supervisor, not just a short title.
+- If a detail is unknown, write "TBD" instead of inventing it.
 - Do not write code here.
-- Return only raw JSON: a list of objects with keys id, title, goal, deliverable.
+- Return only raw JSON: a list of objects.
+- Every object must include id, title, goal, deliverable.
+- Add these fields whenever applicable:
+  user_requirement_trace, dependencies, interfaces, parameters, control_logic,
+  datapath, state_registers, reset_clocking, behavior, edge_cases,
+  acceptance_criteria, notes.
 """,
             ),
             ("human", "User requirement:\n{user_request}"),
@@ -571,6 +635,9 @@ User requirement:
 
 Manager plan:
 {manager_plan}
+
+Manager handoff details:
+{manager_handoff}
 """,
             ),
         ]
@@ -578,7 +645,13 @@ Manager plan:
     response = (prompt | llm).invoke(
         {
             "user_request": state["user_request"],
-            "manager_plan": json.dumps(state["manager_plan"], indent=2),
+            "manager_plan": render_manager_plan(state["manager_plan"]),
+            "manager_handoff": (
+                "Full Manager handoff:\n"
+                f"{render_manager_plan(state['manager_plan'])}\n\n"
+                "Original user requirement, authoritative source:\n"
+                f"{state['user_request']}"
+            ),
         }
     )
     write_text_artifact("architecture_contract.md", response.content)
@@ -619,6 +692,9 @@ Original user requirement:
 Full Manager plan:
 {manager_plan}
 
+Manager handoff packet:
+{manager_handoff}
+
 Architecture contract:
 {architecture_contract}
 
@@ -637,12 +713,17 @@ Previous verification report, if any:
     response = (prompt | llm).invoke(
         {
             "user_request": state["user_request"],
-            "manager_plan": json.dumps(state["manager_plan"], indent=2),
+            "manager_plan": render_manager_plan(state["manager_plan"]),
+            "manager_handoff": current_manager_handoff(state),
             "architecture_contract": state.get("architecture_contract") or "(none)",
-            "task": json.dumps(task, indent=2),
+            "task": render_manager_task(task),
             "rtl_context": state.get("rtl_context") or "(none)",
             "verification_report": state.get("verification_report") or "(none)",
         }
+    )
+    write_text_artifact(
+        f"logs/{task['id']}_manager_handoff.md",
+        current_manager_handoff(state),
     )
     write_text_artifact(
         f"logs/{task['id']}_supervisor_plan.md",
@@ -703,6 +784,9 @@ Architecture contract:
 Current Manager task:
 {task}
 
+Manager handoff packet:
+{manager_handoff}
+
 Supervisor detailed assignment:
 {supervisor_plan}
 
@@ -719,7 +803,8 @@ Previous verification report, if any:
         {
             "user_request": state["user_request"],
             "architecture_contract": state.get("architecture_contract") or "(none)",
-            "task": json.dumps(task, indent=2),
+            "task": render_manager_task(task),
+            "manager_handoff": current_manager_handoff(state),
             "supervisor_plan": state["supervisor_plan"],
             "rtl_context": state.get("rtl_context") or "(none)",
             "verification_report": state.get("verification_report") or "(none)",
@@ -781,6 +866,9 @@ Architecture contract:
 Current Manager task:
 {task}
 
+Manager handoff packet:
+{manager_handoff}
+
 Supervisor detailed assignment:
 {supervisor_plan}
 
@@ -798,7 +886,8 @@ Current RTL files:
         {
             "user_request": state["user_request"],
             "architecture_contract": state.get("architecture_contract") or "(none)",
-            "task": json.dumps(task, indent=2),
+            "task": render_manager_task(task),
+            "manager_handoff": current_manager_handoff(state),
             "supervisor_plan": state["supervisor_plan"],
             "control_datapath_plan": state.get("control_datapath_plan") or "(none)",
             "rtl_context": state.get("rtl_context") or "(none)",
@@ -883,6 +972,9 @@ Architecture contract:
 Current Manager task:
 {task}
 
+Manager handoff packet:
+{manager_handoff}
+
 Supervisor detailed assignment:
 {supervisor_plan}
 
@@ -901,7 +993,8 @@ RTL candidate:
     response = (prompt | llm).invoke(
         {
             "architecture_contract": state.get("architecture_contract") or "(none)",
-            "task": json.dumps(task, indent=2),
+            "task": render_manager_task(task),
+            "manager_handoff": current_manager_handoff(state),
             "supervisor_plan": state["supervisor_plan"],
             "control_datapath_plan": state.get("control_datapath_plan") or "(none)",
             "static_report": static_result["report"],
@@ -1024,6 +1117,9 @@ Architecture contract:
 Current Manager task:
 {task}
 
+Manager handoff packet:
+{manager_handoff}
+
 Supervisor detailed assignment:
 {supervisor_plan}
 
@@ -1040,7 +1136,8 @@ RTL candidate to verify:
         {
             "user_request": state["user_request"],
             "architecture_contract": state.get("architecture_contract") or "(none)",
-            "task": json.dumps(task, indent=2),
+            "task": render_manager_task(task),
+            "manager_handoff": current_manager_handoff(state),
             "supervisor_plan": state["supervisor_plan"],
             "control_datapath_plan": state.get("control_datapath_plan") or "(none)",
             "candidate_rtl": render_files(merged_files),
