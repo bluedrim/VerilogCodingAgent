@@ -215,8 +215,44 @@ def _strip_json_fence(raw_content: str) -> str:
     return content
 
 
+def _extract_json_candidate(raw_content: str) -> str:
+    content = _strip_json_fence(raw_content)
+    if content.startswith("[") or content.startswith("{"):
+        return content
+
+    for opener, closer in (("[", "]"), ("{", "}")):
+        start = content.find(opener)
+        if start == -1:
+            continue
+
+        depth = 0
+        in_string = False
+        escape = False
+        for idx in range(start, len(content)):
+            char = content[idx]
+            if escape:
+                escape = False
+                continue
+            if char == "\\":
+                escape = True
+                continue
+            if char == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if char == opener:
+                depth += 1
+            elif char == closer:
+                depth -= 1
+                if depth == 0:
+                    return content[start : idx + 1]
+
+    return content
+
+
 def _load_json(raw_content: str):
-    return json.loads(_strip_json_fence(raw_content))
+    return json.loads(_extract_json_candidate(raw_content))
 
 
 def _json_bool(value: object) -> bool:
