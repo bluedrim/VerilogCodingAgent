@@ -70,6 +70,10 @@ class AgentState(TypedDict):
     max_architecture_retries: int
     current_task_index: int
     supervisor_plan: str
+    supervisor_review_passed: bool
+    supervisor_review_report: str
+    supervisor_retry_count: int
+    max_supervisor_retries: int
     control_datapath_plan: str
     microarchitecture_passed: bool
     microarchitecture_report: str
@@ -814,6 +818,12 @@ Architecture contract:
 def supervisor_agent(state: AgentState):
     task = current_manager_task(state)
     print(f"---SUPERVISOR: Detailing Task {task['id']} - {task['title']}---")
+    review_feedback = ""
+    if state.get("supervisor_review_report"):
+        review_feedback = (
+            "\nPrevious supervisor review feedback to fix:\n"
+            f"{state['supervisor_review_report']}"
+        )
     prompt = ChatPromptTemplate.from_messages(
         [
             (
@@ -822,15 +832,41 @@ def supervisor_agent(state: AgentState):
 You are the Supervisor for a Verilog RTL team.
 Turn the Manager's current task into a concrete coding assignment.
 
-Include:
-- The exact RTL behavior to implement now.
-- Interfaces, parameters, state machines, and reset/clock assumptions.
-- Which parts are control logic and which parts are datapath.
-- Expected registers, enables, mux selects, counters, valid/ready behavior, and done/error conditions.
-- How this task should preserve or extend the existing RTL context.
-- Specific checks the verification team must run mentally on the generated code.
+Your output is the authoritative task packet for the downstream planner and coding team.
+It must be concrete enough that the Coding Team can implement without guessing.
 
-Return concise plain text, not JSON.
+Include these Markdown sections:
+1. Task Objective
+   - Exact RTL behavior to implement now.
+   - Explicit scope exclusions for this task.
+2. Source Trace
+   - Manager task id/title.
+   - User requirement bullets this task satisfies.
+   - Architecture contract decisions this task must obey.
+3. File and Module Impact
+   - Files/modules to create or modify.
+   - Top/module interface changes, if any.
+   - Compatibility constraints with existing RTL context.
+4. Interface and Parameter Contract
+   - Signal names, directions, widths, reset values, clock domains, handshake meanings.
+   - Parameters/localparams and allowed values.
+5. Control/Data Path Assignment
+   - Control logic responsibilities.
+   - Datapath responsibilities.
+   - Registers, enables, mux selects, counters, valid/ready/done/error conditions.
+6. Sequencing and Timing
+   - Cycle-level behavior, latency, throughput, backpressure, reset release behavior.
+7. Edge Cases and Error Handling
+   - Overflow/underflow, invalid inputs, simultaneous events, boundary values.
+8. Implementation Checklist
+   - Concrete items the Coding Team must implement.
+9. Verification Checklist
+   - Concrete items the Verification Team must check.
+10. Handoff Notes
+   - TBDs, assumptions, and risks.
+
+If information is unknown, mark it as TBD and explain why.
+Do not write RTL code.
 """,
             ),
             (
@@ -856,6 +892,8 @@ Existing RTL context:
 
 Previous verification report, if any:
 {verification_report}
+
+{review_feedback}
 """,
             ),
         ]
@@ -869,6 +907,7 @@ Previous verification report, if any:
             "task": render_manager_task(task),
             "rtl_context": state.get("rtl_context") or "(none)",
             "verification_report": state.get("verification_report") or "(none)",
+            "review_feedback": review_feedback,
         }
     )
     write_text_artifact(
@@ -881,8 +920,96 @@ Previous verification report, if any:
     )
     return {
         "supervisor_plan": response.content,
+        "supervisor_review_passed": False,
         "generation_ok": False,
         "verification_passed": False,
+        "messages": [response],
+    }
+
+
+def supervisor_review_agent(state: AgentState):
+    task = current_manager_task(state)
+    print(f"---SUPERVISOR REVIEW: Checking task packet for {task['id']}---")
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            (
+                "system",
+                """
+You are the Supervisor Review Gate.
+Check whether the Supervisor task packet is complete enough for the Control/Data Path Planner and Coding Team.
+
+Required coverage:
+- Task objective and explicit scope exclusions.
+- Traceability to Manager handoff, user requirement, and architecture contract.
+- Files/modules to create or modify.
+- Interface/parameter contract with signal names, directions, widths, clock domains, reset values.
+- Control/data path assignment.
+- Cycle-level timing, latency, throughput, reset release, and backpressure behavior.
+- Edge cases and error behavior.
+- Implementation checklist.
+- Verification checklist.
+- TBDs/assumptions/risks called out explicitly.
+
+Return only raw JSON:
+{{
+  "pass": true|false,
+  "report": "specific missing or weak supervisor handoff items to fix"
+}}
+""",
+            ),
+            (
+                "human",
+                """
+Original user requirement:
+{user_request}
+
+Manager handoff:
+{manager_handoff}
+
+Architecture contract:
+{architecture_contract}
+
+Supervisor task packet:
+{supervisor_plan}
+""",
+            ),
+        ]
+    )
+    response = (prompt | llm).invoke(
+        {
+            "user_request": state["user_request"],
+            "manager_handoff": current_manager_handoff(state),
+            "architecture_contract": state.get("architecture_contract") or "(none)",
+            "supervisor_plan": state.get("supervisor_plan") or "(none)",
+        }
+    )
+
+    try:
+        result = _load_json(response.content)
+        passed = _json_bool(result.get("pass"))
+        report = str(result.get("report", "")).strip()
+    except (json.JSONDecodeError, AttributeError):
+        passed = False
+        report = "Supervisor review output was not valid JSON."
+
+    write_text_artifact(
+        f"logs/{task['id']}_supervisor_review_attempt_{state.get('supervisor_retry_count', 0) + 1}.md",
+        report or ("PASS" if passed else "FAIL"),
+    )
+
+    if passed:
+        print("---SUPERVISOR REVIEW: PASS---")
+        return {
+            "supervisor_review_passed": True,
+            "supervisor_review_report": report or "PASS",
+            "messages": [response],
+        }
+
+    print("---SUPERVISOR REVIEW: FAIL---")
+    return {
+        "supervisor_review_passed": False,
+        "supervisor_review_report": report or "Supervisor task packet is incomplete.",
+        "supervisor_retry_count": state.get("supervisor_retry_count", 0) + 1,
         "messages": [response],
     }
 
@@ -1344,6 +1471,13 @@ def supervisor_accept_agent(state: AgentState):
         "current_task_index": state["current_task_index"] + 1,
         "candidate_files": [],
         "retry_count": 0,
+        "supervisor_plan": "",
+        "supervisor_review_passed": False,
+        "supervisor_review_report": "",
+        "supervisor_retry_count": 0,
+        "control_datapath_plan": "",
+        "microarchitecture_passed": False,
+        "microarchitecture_report": "",
     }
 
 
@@ -1449,6 +1583,7 @@ def summary_agent(state: AgentState):
         "manager_plan_saved": str(ARTIFACT_DIR / "manager_plan.json"),
         "architecture_contract_saved": str(ARTIFACT_DIR / "architecture_contract.md"),
         "last_architecture_review_report": state.get("architecture_review_report", ""),
+        "last_supervisor_review_report": state.get("supervisor_review_report", ""),
         "control_datapath_plans_saved": str(ARTIFACT_DIR / "logs"),
         "last_microarchitecture_report": state.get("microarchitecture_report", ""),
         "rtl_files": [file_info["filename"] for file_info in state.get("final_files", [])],
@@ -1515,6 +1650,15 @@ def architecture_review_condition(state: AgentState):
     return "retry"
 
 
+def supervisor_review_condition(state: AgentState):
+    if state.get("supervisor_review_passed"):
+        return "control_datapath"
+    if state.get("supervisor_retry_count", 0) >= state.get("max_supervisor_retries", 2):
+        print("---CONDITION: Max supervisor review retries reached. Continuing with latest task packet.---")
+        return "control_datapath"
+    return "retry"
+
+
 def microarchitecture_condition(state: AgentState):
     if state.get("microarchitecture_passed"):
         return "verify"
@@ -1559,6 +1703,7 @@ workflow.add_node("manager", manager_agent)
 workflow.add_node("architecture", architecture_agent)
 workflow.add_node("architecture_review", architecture_review_agent)
 workflow.add_node("supervisor", supervisor_agent)
+workflow.add_node("supervisor_review", supervisor_review_agent)
 workflow.add_node("control_datapath_planner", control_datapath_planner_agent)
 workflow.add_node("verilog_coding_team", verilog_coding_team_agent)
 workflow.add_node("microarchitecture_reviewer", microarchitecture_reviewer_agent)
@@ -1581,7 +1726,12 @@ workflow.add_conditional_edges(
     architecture_review_condition,
     {"supervisor": "supervisor", "retry": "architecture"},
 )
-workflow.add_edge("supervisor", "control_datapath_planner")
+workflow.add_edge("supervisor", "supervisor_review")
+workflow.add_conditional_edges(
+    "supervisor_review",
+    supervisor_review_condition,
+    {"control_datapath": "control_datapath_planner", "retry": "supervisor"},
+)
 workflow.add_edge("control_datapath_planner", "verilog_coding_team")
 workflow.add_conditional_edges(
     "verilog_coding_team",
@@ -1665,6 +1815,10 @@ if __name__ == "__main__":
         "max_architecture_retries": 2,
         "current_task_index": 0,
         "supervisor_plan": "",
+        "supervisor_review_passed": False,
+        "supervisor_review_report": "",
+        "supervisor_retry_count": 0,
+        "max_supervisor_retries": 2,
         "control_datapath_plan": "",
         "microarchitecture_passed": False,
         "microarchitecture_report": "",
