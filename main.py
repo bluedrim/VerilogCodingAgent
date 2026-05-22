@@ -280,6 +280,11 @@ def parse_args():
     )
     parser.add_argument("--llm-model", help="LLM model name, for example gpt-oss:20b.")
     parser.add_argument("--llm-temperature", type=float, help="LLM temperature.")
+    parser.add_argument(
+        "--llm-api-url",
+        help="OpenAI-compatible chat completions URL, for example http://abc.net:30001/chat/completions.",
+    )
+    parser.add_argument("--llm-api-key", help="API key for an OpenAI-compatible gpt-oss endpoint.")
     return parser.parse_args()
 
 
