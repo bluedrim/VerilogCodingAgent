@@ -64,6 +64,10 @@ class AgentState(TypedDict):
     user_request: str
     manager_plan: List[Dict[str, str]]
     architecture_contract: str
+    architecture_review_passed: bool
+    architecture_review_report: str
+    architecture_retry_count: int
+    max_architecture_retries: int
     current_task_index: int
     supervisor_plan: str
     control_datapath_plan: str
@@ -642,6 +646,12 @@ Rules:
 
 def architecture_agent(state: AgentState):
     print("---ARCHITECT: Creating RTL Architecture Contract---")
+    review_feedback = ""
+    if state.get("architecture_review_report"):
+        review_feedback = (
+            "\nPrevious architecture review feedback to fix:\n"
+            f"{state['architecture_review_report']}"
+        )
     prompt = ChatPromptTemplate.from_messages(
         [
             (
@@ -654,11 +664,18 @@ Include:
 - Proposed top module name and purpose.
 - Clock/reset assumptions and reset polarity.
 - External interface summary.
+- Module decomposition table: module name, responsibility, inputs, outputs, parameters.
+- Interface contract table: signal name, direction, width, clock domain, reset value, timing meaning.
 - Key internal blocks with explicit control logic and datapath responsibilities.
 - Expected FSMs, counters, registers, muxes, comparators, arithmetic units, and handshakes.
+- Pipeline/latency/throughput assumptions.
+- Clock-domain and reset-domain assumptions.
+- Error, saturation, overflow/underflow, invalid input, and backpressure behavior.
 - Parameterization policy.
 - Coding constraints for synthesizable RTL.
-- Verification intent and corner cases.
+- Architecture traceability matrix mapping user requirements and Manager tasks to architecture decisions.
+- Open questions/TBD list. Do not hide unknowns.
+- Verification intent, corner cases, and acceptance criteria.
 
 Return concise Markdown.
 """,
@@ -674,6 +691,8 @@ Manager plan:
 
 Manager handoff details:
 {manager_handoff}
+
+{review_feedback}
 """,
             ),
         ]
@@ -688,11 +707,106 @@ Manager handoff details:
                 "Original user requirement, authoritative source:\n"
                 f"{state['user_request']}"
             ),
+            "review_feedback": review_feedback,
         }
     )
     write_text_artifact("architecture_contract.md", response.content)
     return {
         "architecture_contract": response.content,
+        "architecture_review_passed": False,
+        "messages": [response],
+    }
+
+
+def architecture_review_agent(state: AgentState):
+    print("---ARCHITECTURE REVIEW: Checking architecture contract completeness---")
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            (
+                "system",
+                """
+You are the Architecture Review Gate.
+Check whether the architecture contract is complete enough for Supervisor, Control/Data Path Planner, Coding Team, and Verification Team.
+
+Review against:
+- Original user requirement.
+- Full Manager handoff.
+- Manager task sequence.
+
+Required architecture coverage:
+- Top module and module decomposition.
+- External interfaces with direction, width, timing meaning, and reset value.
+- Clock/reset assumptions and domains.
+- Control/data path responsibilities.
+- FSM/counter/register/mux/arithmetic/memory resources.
+- Latency, throughput, handshakes, backpressure.
+- Error/overflow/underflow/invalid input behavior.
+- Parameterization policy.
+- Requirement-to-architecture traceability.
+- Open TBDs clearly listed.
+- Verification intent and acceptance criteria.
+
+Return only raw JSON:
+{{
+  "pass": true|false,
+  "report": "specific missing or weak architecture items to fix"
+}}
+""",
+            ),
+            (
+                "human",
+                """
+Original user requirement:
+{user_request}
+
+Manager handoff:
+{manager_handoff}
+
+Architecture contract:
+{architecture_contract}
+""",
+            ),
+        ]
+    )
+    response = (prompt | llm).invoke(
+        {
+            "user_request": state["user_request"],
+            "manager_handoff": (
+                "Full Manager handoff:\n"
+                f"{render_manager_plan(state['manager_plan'])}\n\n"
+                "Original user requirement, authoritative source:\n"
+                f"{state['user_request']}"
+            ),
+            "architecture_contract": state.get("architecture_contract") or "(none)",
+        }
+    )
+
+    try:
+        result = _load_json(response.content)
+        passed = _json_bool(result.get("pass"))
+        report = str(result.get("report", "")).strip()
+    except (json.JSONDecodeError, AttributeError):
+        passed = False
+        report = "Architecture review output was not valid JSON."
+
+    write_text_artifact(
+        f"logs/architecture_review_attempt_{state.get('architecture_retry_count', 0) + 1}.md",
+        report or ("PASS" if passed else "FAIL"),
+    )
+
+    if passed:
+        print("---ARCHITECTURE REVIEW: PASS---")
+        return {
+            "architecture_review_passed": True,
+            "architecture_review_report": report or "PASS",
+            "messages": [response],
+        }
+
+    print("---ARCHITECTURE REVIEW: FAIL---")
+    return {
+        "architecture_review_passed": False,
+        "architecture_review_report": report or "Architecture contract is incomplete.",
+        "architecture_retry_count": state.get("architecture_retry_count", 0) + 1,
         "messages": [response],
     }
 
@@ -1334,6 +1448,7 @@ def summary_agent(state: AgentState):
         "user_request_saved": str(ARTIFACT_DIR / "user_requirement.txt"),
         "manager_plan_saved": str(ARTIFACT_DIR / "manager_plan.json"),
         "architecture_contract_saved": str(ARTIFACT_DIR / "architecture_contract.md"),
+        "last_architecture_review_report": state.get("architecture_review_report", ""),
         "control_datapath_plans_saved": str(ARTIFACT_DIR / "logs"),
         "last_microarchitecture_report": state.get("microarchitecture_report", ""),
         "rtl_files": [file_info["filename"] for file_info in state.get("final_files", [])],
@@ -1391,6 +1506,15 @@ def coding_condition(state: AgentState):
     return "retry"
 
 
+def architecture_review_condition(state: AgentState):
+    if state.get("architecture_review_passed"):
+        return "supervisor"
+    if state.get("architecture_retry_count", 0) >= state.get("max_architecture_retries", 2):
+        print("---CONDITION: Max architecture review retries reached. Continuing with latest contract.---")
+        return "supervisor"
+    return "retry"
+
+
 def microarchitecture_condition(state: AgentState):
     if state.get("microarchitecture_passed"):
         return "verify"
@@ -1433,6 +1557,7 @@ workflow = StateGraph(AgentState)
 workflow.add_node("intake", intake_agent)
 workflow.add_node("manager", manager_agent)
 workflow.add_node("architecture", architecture_agent)
+workflow.add_node("architecture_review", architecture_review_agent)
 workflow.add_node("supervisor", supervisor_agent)
 workflow.add_node("control_datapath_planner", control_datapath_planner_agent)
 workflow.add_node("verilog_coding_team", verilog_coding_team_agent)
@@ -1450,7 +1575,12 @@ workflow.set_entry_point("intake")
 
 workflow.add_edge("intake", "manager")
 workflow.add_edge("manager", "architecture")
-workflow.add_edge("architecture", "supervisor")
+workflow.add_edge("architecture", "architecture_review")
+workflow.add_conditional_edges(
+    "architecture_review",
+    architecture_review_condition,
+    {"supervisor": "supervisor", "retry": "architecture"},
+)
 workflow.add_edge("supervisor", "control_datapath_planner")
 workflow.add_edge("control_datapath_planner", "verilog_coding_team")
 workflow.add_conditional_edges(
@@ -1529,6 +1659,10 @@ if __name__ == "__main__":
         "user_request": args.spec or "",
         "manager_plan": [],
         "architecture_contract": "",
+        "architecture_review_passed": False,
+        "architecture_review_report": "",
+        "architecture_retry_count": 0,
+        "max_architecture_retries": 2,
         "current_task_index": 0,
         "supervisor_plan": "",
         "control_datapath_plan": "",

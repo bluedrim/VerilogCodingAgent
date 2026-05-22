@@ -77,6 +77,7 @@ Important artifacts:
 - `generated_rtl/llm_config.json`
 - `generated_rtl/manager_plan.json`
 - `generated_rtl/architecture_contract.md`
+- `generated_rtl/logs/architecture_review_attempt_*.md`
 - `generated_rtl/logs/*_control_datapath_plan.md`
 - `generated_rtl/logs/*_microarchitecture_review_attempt_*.md`
 - `generated_rtl/compile_order.f`
