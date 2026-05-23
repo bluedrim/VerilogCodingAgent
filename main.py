@@ -13,7 +13,12 @@ from typing import Annotated, Dict, List, TypedDict
 if any(arg in {"-h", "--help"} for arg in sys.argv[1:]):
     help_parser = argparse.ArgumentParser(description="Run the Verilog coding agent.")
     help_parser.add_argument("--spec", help="RTL requirement text or path to a requirement file.")
-    help_parser.add_argument("--max-retries", type=int, default=3, help="Maximum retries per task.")
+    help_parser.add_argument(
+        "--max-retries",
+        type=int,
+        default=3,
+        help="Maximum retries per coding, microarchitecture review, and verification stage.",
+    )
     help_parser.add_argument(
         "--auto-approve",
         action="store_true",
@@ -23,6 +28,11 @@ if any(arg in {"-h", "--help"} for arg in sys.argv[1:]):
         "--no-testbench",
         action="store_true",
         help="Skip smoke testbench generation.",
+    )
+    help_parser.add_argument(
+        "--require-lint",
+        action="store_true",
+        help="Fail when neither verilator nor iverilog is installed.",
     )
     help_parser.add_argument(
         "--llm-provider",
@@ -75,8 +85,17 @@ class AgentState(TypedDict):
     supervisor_retry_count: int
     max_supervisor_retries: int
     control_datapath_plan: str
+    control_datapath_review_passed: bool
+    control_datapath_review_report: str
+    control_datapath_retry_count: int
+    max_control_datapath_retries: int
     microarchitecture_passed: bool
     microarchitecture_report: str
+    coding_retry_count: int
+    microarchitecture_retry_count: int
+    verification_retry_count: int
+    testbench_retry_count: int
+    max_testbench_retries: int
     rtl_context: str
     candidate_files: List[Dict[str, str]]
     final_files: List[Dict[str, str]]
@@ -85,11 +104,15 @@ class AgentState(TypedDict):
     verification_passed: bool
     verification_report: str
     lint_report: str
+    require_lint: bool
+    final_lint_passed: bool
     final_lint_report: str
     human_approved: bool
     skip_testbench: bool
-    retry_count: int
     max_retries: int
+    run_status: str
+    failed_stage: str
+    blocking_report: str
     generation_ok: bool
     error_message: str
 
@@ -362,7 +385,12 @@ def validate_generated_files(files: object):
 def parse_args():
     parser = argparse.ArgumentParser(description="Run the Verilog coding agent.")
     parser.add_argument("--spec", help="RTL requirement text or path to a requirement file.")
-    parser.add_argument("--max-retries", type=int, default=3, help="Maximum retries per task.")
+    parser.add_argument(
+        "--max-retries",
+        type=int,
+        default=3,
+        help="Maximum retries per coding, microarchitecture review, and verification stage.",
+    )
     parser.add_argument(
         "--auto-approve",
         action="store_true",
@@ -372,6 +400,11 @@ def parse_args():
         "--no-testbench",
         action="store_true",
         help="Skip smoke testbench generation.",
+    )
+    parser.add_argument(
+        "--require-lint",
+        action="store_true",
+        help="Fail when neither verilator nor iverilog is installed.",
     )
     parser.add_argument(
         "--llm-provider",
@@ -526,12 +559,17 @@ def current_manager_task(state: AgentState):
     return state["manager_plan"][state["current_task_index"]]
 
 
-def run_syntax_lint(files: List[Dict[str, str]]) -> Dict[str, object]:
+def run_syntax_lint(files: List[Dict[str, str]], require_tool: bool = False) -> Dict[str, object]:
     if not files:
         return {"passed": False, "report": "No files were available for lint."}
 
     lint_tool = shutil.which("verilator") or shutil.which("iverilog")
     if not lint_tool:
+        if require_tool:
+            return {
+                "passed": False,
+                "report": "Syntax lint failed: --require-lint was set but neither verilator nor iverilog is installed.",
+            }
         return {
             "passed": True,
             "report": "Syntax lint skipped: neither verilator nor iverilog is installed.",
@@ -636,7 +674,19 @@ Rules:
                 "id": "T1",
                 "title": "Implement requested RTL",
                 "goal": state["user_request"],
+                "user_requirement_trace": state["user_request"],
+                "dependencies": "TBD: Manager JSON recovery fallback used.",
+                "interfaces": "TBD: derive exact ports, widths, and handshakes from the user requirement.",
+                "parameters": "TBD: derive configurable widths/depths and defaults from the user requirement.",
+                "control_logic": "TBD: identify FSMs, enables, valid/ready, done/error, and sequencing.",
+                "datapath": "TBD: identify registers, counters, arithmetic, memories/FIFOs, muxes, and width policy.",
+                "state_registers": "TBD: identify state and datapath registers with reset values.",
+                "reset_clocking": "TBD: identify clock domains, reset polarity, reset values, and reset release behavior.",
+                "behavior": state["user_request"],
+                "edge_cases": "TBD: identify boundary values, simultaneous events, overflow/underflow, invalid inputs, and backpressure.",
+                "acceptance_criteria": "Generated RTL must satisfy the original user requirement and pass sanity, lint when available, microarchitecture review, and verification review.",
                 "deliverable": "Complete synthesizable Verilog/SystemVerilog RTL.",
+                "notes": "Fallback plan created because Manager output was not valid structured JSON.",
             }
         ]
         write_json_artifact("manager_plan.json", fallback_plan)
@@ -1017,6 +1067,12 @@ Supervisor task packet:
 def control_datapath_planner_agent(state: AgentState):
     task = current_manager_task(state)
     print(f"---CONTROL/DATAPATH PLANNER: Structuring {task['id']}---")
+    review_feedback = ""
+    if state.get("control_datapath_review_report"):
+        review_feedback = (
+            "\nPrevious Control/Data Path review feedback to fix:\n"
+            f"{state['control_datapath_review_report']}"
+        )
     prompt = ChatPromptTemplate.from_messages(
         [
             (
@@ -1072,6 +1128,8 @@ Existing RTL context:
 
 Previous verification report, if any:
 {verification_report}
+
+{review_feedback}
 """,
             ),
         ]
@@ -1085,6 +1143,7 @@ Previous verification report, if any:
             "supervisor_plan": state["supervisor_plan"],
             "rtl_context": state.get("rtl_context") or "(none)",
             "verification_report": state.get("verification_report") or "(none)",
+            "review_feedback": review_feedback,
         }
     )
     write_text_artifact(
@@ -1093,6 +1152,95 @@ Previous verification report, if any:
     )
     return {
         "control_datapath_plan": response.content,
+        "control_datapath_review_passed": False,
+        "messages": [response],
+    }
+
+
+def control_datapath_review_agent(state: AgentState):
+    task = current_manager_task(state)
+    print(f"---CONTROL/DATAPATH REVIEW: Checking micro-architecture plan for {task['id']}---")
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            (
+                "system",
+                """
+You are the Control/Data Path Review Gate.
+Check whether the micro-architecture plan is concrete enough for RTL coding.
+
+Required coverage:
+- FSM/state sequencing, or a clear reason no FSM is needed.
+- Control outputs, enables, mux selects, valid/ready, done/error, load/clear.
+- Datapath registers, counters, arithmetic/comparison units, memories/FIFOs, and muxes.
+- Cycle-level timing, latency, throughput, reset release, and backpressure.
+- Width and parameter policy, including overflow/underflow handling.
+- Clear mapping from Supervisor assignment to implementation checklist.
+- Verification focus with concrete corner cases.
+
+Return only raw JSON:
+{{
+  "pass": true|false,
+  "report": "specific missing or weak control/datapath plan items to fix"
+}}
+""",
+            ),
+            (
+                "human",
+                """
+Original user requirement:
+{user_request}
+
+Architecture contract:
+{architecture_contract}
+
+Manager handoff:
+{manager_handoff}
+
+Supervisor task packet:
+{supervisor_plan}
+
+Control/Data Path plan:
+{control_datapath_plan}
+""",
+            ),
+        ]
+    )
+    response = (prompt | llm).invoke(
+        {
+            "user_request": state["user_request"],
+            "architecture_contract": state.get("architecture_contract") or "(none)",
+            "manager_handoff": current_manager_handoff(state),
+            "supervisor_plan": state.get("supervisor_plan") or "(none)",
+            "control_datapath_plan": state.get("control_datapath_plan") or "(none)",
+        }
+    )
+
+    try:
+        result = _load_json(response.content)
+        passed = _json_bool(result.get("pass"))
+        report = str(result.get("report", "")).strip()
+    except (json.JSONDecodeError, AttributeError):
+        passed = False
+        report = "Control/Data Path review output was not valid JSON."
+
+    write_text_artifact(
+        f"logs/{task['id']}_control_datapath_review_attempt_{state.get('control_datapath_retry_count', 0) + 1}.md",
+        report or ("PASS" if passed else "FAIL"),
+    )
+
+    if passed:
+        print("---CONTROL/DATAPATH REVIEW: PASS---")
+        return {
+            "control_datapath_review_passed": True,
+            "control_datapath_review_report": report or "PASS",
+            "messages": [response],
+        }
+
+    print("---CONTROL/DATAPATH REVIEW: FAIL---")
+    return {
+        "control_datapath_review_passed": False,
+        "control_datapath_review_report": report or "Control/Data Path plan is incomplete.",
+        "control_datapath_retry_count": state.get("control_datapath_retry_count", 0) + 1,
         "messages": [response],
     }
 
@@ -1101,10 +1249,12 @@ def verilog_coding_team_agent(state: AgentState):
     task = current_manager_task(state)
     print(f"---VERILOG CODING TEAM: Implementing {task['id']}---")
     feedback = ""
-    if state.get("verification_report") and state.get("retry_count", 0) > 0:
+    if state.get("verification_report") and state.get("verification_retry_count", 0) > 0:
         feedback = f"\nFix the previous verification failures:\n{state['verification_report']}"
-    if state.get("microarchitecture_report") and state.get("retry_count", 0) > 0:
+    if state.get("microarchitecture_report") and state.get("microarchitecture_retry_count", 0) > 0:
         feedback += f"\nFix the previous microarchitecture review failures:\n{state['microarchitecture_report']}"
+    if state.get("error_message") and state.get("coding_retry_count", 0) > 0:
+        feedback += f"\nFix the previous coding output format failure:\n{state['error_message']}"
 
     prompt = ChatPromptTemplate.from_messages(
         [
@@ -1179,7 +1329,7 @@ Current RTL files:
             raise ValueError(validation_error)
         print(f"---VERILOG CODING TEAM: Generated {len(files)} candidate files.---")
         write_json_artifact(
-            f"logs/{task['id']}_coding_attempt_{state.get('retry_count', 0) + 1}.json",
+            f"logs/{task['id']}_coding_attempt_{state.get('coding_retry_count', 0) + 1}.json",
             files,
         )
         return {
@@ -1187,20 +1337,25 @@ Current RTL files:
             "generation_ok": True,
             "microarchitecture_passed": False,
             "messages": [response],
+            "failed_stage": "",
+            "blocking_report": "",
             "error_message": "",
         }
     except (json.JSONDecodeError, ValueError) as exc:
         print(f"---ERROR: Coding team produced invalid JSON: {exc}---")
         write_text_artifact(
-            f"failed_attempts/{task['id']}_invalid_json_attempt_{state.get('retry_count', 0) + 1}.txt",
+            f"failed_attempts/{task['id']}_invalid_json_attempt_{state.get('coding_retry_count', 0) + 1}.txt",
             response.content,
         )
+        report = f"Coding output format failed: {exc}. Regenerate valid JSON only."
         return {
             "generation_ok": False,
             "microarchitecture_passed": False,
             "verification_passed": False,
-            "verification_report": f"Coding output format failed: {exc}. Regenerate valid JSON only.",
-            "retry_count": state.get("retry_count", 0) + 1,
+            "verification_report": report,
+            "coding_retry_count": state.get("coding_retry_count", 0) + 1,
+            "failed_stage": "coding",
+            "blocking_report": report,
             "messages": [response],
             "error_message": str(exc),
         }
@@ -1212,7 +1367,7 @@ def microarchitecture_reviewer_agent(state: AgentState):
     merged_files = merge_files(state.get("final_files", []), state.get("candidate_files", []))
     static_result = static_microarchitecture_review(state.get("candidate_files", []))
     write_text_artifact(
-        f"logs/{task['id']}_microarchitecture_static_attempt_{state.get('retry_count', 0) + 1}.txt",
+        f"logs/{task['id']}_microarchitecture_static_attempt_{state.get('microarchitecture_retry_count', 0) + 1}.txt",
         static_result["report"],
     )
 
@@ -1291,7 +1446,7 @@ RTL candidate:
         report = f"Static microarchitecture scan failed:\n{static_result['report']}\n\n{report}"
 
     write_text_artifact(
-        f"logs/{task['id']}_microarchitecture_review_attempt_{state.get('retry_count', 0) + 1}.md",
+        f"logs/{task['id']}_microarchitecture_review_attempt_{state.get('microarchitecture_retry_count', 0) + 1}.md",
         report or ("PASS" if passed else "FAIL"),
     )
 
@@ -1300,18 +1455,22 @@ RTL candidate:
         return {
             "microarchitecture_passed": True,
             "microarchitecture_report": report or "PASS",
+            "failed_stage": "",
+            "blocking_report": "",
             "messages": [response],
         }
 
     print("---MICROARCH REVIEWER: FAIL---")
     write_text_artifact(
-        f"failed_attempts/{task['id']}_microarchitecture_failed_attempt_{state.get('retry_count', 0) + 1}.txt",
+        f"failed_attempts/{task['id']}_microarchitecture_failed_attempt_{state.get('microarchitecture_retry_count', 0) + 1}.txt",
         render_files(state.get("candidate_files", [])) + "\n\n" + report,
     )
     return {
         "microarchitecture_passed": False,
         "microarchitecture_report": report or "Microarchitecture review failed.",
-        "retry_count": state.get("retry_count", 0) + 1,
+        "microarchitecture_retry_count": state.get("microarchitecture_retry_count", 0) + 1,
+        "failed_stage": "microarchitecture_review",
+        "blocking_report": report or "Microarchitecture review failed.",
         "messages": [response],
     }
 
@@ -1322,31 +1481,33 @@ def verification_team_agent(state: AgentState):
     merged_files = merge_files(state.get("final_files", []), state.get("candidate_files", []))
     sanity_result = basic_rtl_sanity(merged_files)
     write_text_artifact(
-        f"logs/{task['id']}_basic_sanity_attempt_{state.get('retry_count', 0) + 1}.txt",
+        f"logs/{task['id']}_basic_sanity_attempt_{state.get('verification_retry_count', 0) + 1}.txt",
         sanity_result["report"],
     )
     if not sanity_result["passed"]:
         report = f"Basic RTL sanity failed before lint:\n{sanity_result['report']}"
         write_text_artifact(
-            f"failed_attempts/{task['id']}_sanity_failed_attempt_{state.get('retry_count', 0) + 1}.txt",
+            f"failed_attempts/{task['id']}_sanity_failed_attempt_{state.get('verification_retry_count', 0) + 1}.txt",
             render_files(state.get("candidate_files", [])) + "\n\n" + report,
         )
         print("---VERIFICATION TEAM: BASIC SANITY FAIL---")
         return {
             "verification_passed": False,
             "verification_report": report,
-            "retry_count": state.get("retry_count", 0) + 1,
+            "verification_retry_count": state.get("verification_retry_count", 0) + 1,
+            "failed_stage": "verification",
+            "blocking_report": report,
         }
 
-    lint_result = run_syntax_lint(merged_files)
+    lint_result = run_syntax_lint(merged_files, state.get("require_lint", False))
     write_text_artifact(
-        f"logs/{task['id']}_lint_attempt_{state.get('retry_count', 0) + 1}.txt",
+        f"logs/{task['id']}_lint_attempt_{state.get('verification_retry_count', 0) + 1}.txt",
         lint_result["report"],
     )
     if not lint_result["passed"]:
         report = f"Syntax lint failed before functional review:\n{lint_result['report']}"
         write_text_artifact(
-            f"failed_attempts/{task['id']}_lint_failed_attempt_{state.get('retry_count', 0) + 1}.txt",
+            f"failed_attempts/{task['id']}_lint_failed_attempt_{state.get('verification_retry_count', 0) + 1}.txt",
             render_files(state.get("candidate_files", [])) + "\n\n" + report,
         )
         print("---VERIFICATION TEAM: LINT FAIL---")
@@ -1354,7 +1515,9 @@ def verification_team_agent(state: AgentState):
             "verification_passed": False,
             "verification_report": report,
             "lint_report": lint_result["report"],
-            "retry_count": state.get("retry_count", 0) + 1,
+            "verification_retry_count": state.get("verification_retry_count", 0) + 1,
+            "failed_stage": "verification_lint",
+            "blocking_report": report,
         }
 
     prompt = ChatPromptTemplate.from_messages(
@@ -1439,19 +1602,23 @@ RTL candidate to verify:
             "verification_passed": True,
             "verification_report": report or "PASS",
             "lint_report": lint_result["report"],
+            "failed_stage": "",
+            "blocking_report": "",
             "messages": [response],
         }
 
     print("---VERIFICATION TEAM: FAIL---")
     write_text_artifact(
-        f"failed_attempts/{task['id']}_functional_failed_attempt_{state.get('retry_count', 0) + 1}.txt",
+        f"failed_attempts/{task['id']}_functional_failed_attempt_{state.get('verification_retry_count', 0) + 1}.txt",
         render_files(state.get("candidate_files", [])) + "\n\n" + report,
     )
     return {
         "verification_passed": False,
         "verification_report": report or "Verification failed without a detailed report.",
         "lint_report": lint_result["report"],
-        "retry_count": state.get("retry_count", 0) + 1,
+        "verification_retry_count": state.get("verification_retry_count", 0) + 1,
+        "failed_stage": "verification",
+        "blocking_report": report or "Verification failed without a detailed report.",
         "messages": [response],
     }
 
@@ -1470,14 +1637,25 @@ def supervisor_accept_agent(state: AgentState):
         "top_module_candidates": top_module_candidates,
         "current_task_index": state["current_task_index"] + 1,
         "candidate_files": [],
-        "retry_count": 0,
+        "coding_retry_count": 0,
+        "microarchitecture_retry_count": 0,
+        "verification_retry_count": 0,
+        "generation_ok": False,
+        "verification_passed": False,
+        "verification_report": "",
+        "lint_report": "",
         "supervisor_plan": "",
         "supervisor_review_passed": False,
         "supervisor_review_report": "",
         "supervisor_retry_count": 0,
         "control_datapath_plan": "",
+        "control_datapath_review_passed": False,
+        "control_datapath_review_report": "",
+        "control_datapath_retry_count": 0,
         "microarchitecture_passed": False,
         "microarchitecture_report": "",
+        "failed_stage": "",
+        "blocking_report": "",
     }
 
 
@@ -1531,15 +1709,24 @@ Top module candidates, in observed order:
         return {
             "testbench_files": files,
             "generation_ok": True,
+            "failed_stage": "",
+            "blocking_report": "",
             "messages": [response],
         }
     except (json.JSONDecodeError, ValueError) as exc:
         print(f"---ERROR: Testbench team produced invalid JSON: {exc}---")
-        write_text_artifact("failed_attempts/testbench_invalid_json.txt", response.content)
+        write_text_artifact(
+            f"failed_attempts/testbench_invalid_json_attempt_{state.get('testbench_retry_count', 0) + 1}.txt",
+            response.content,
+        )
+        report = f"Testbench generation failed: {exc}"
         return {
             "testbench_files": [],
             "generation_ok": False,
-            "verification_report": f"Testbench generation failed: {exc}",
+            "verification_report": report,
+            "testbench_retry_count": state.get("testbench_retry_count", 0) + 1,
+            "failed_stage": "testbench",
+            "blocking_report": report,
             "messages": [response],
         }
 
@@ -1547,14 +1734,26 @@ Top module candidates, in observed order:
 def final_lint_agent(state: AgentState):
     print("---FINAL LINT: Checking RTL and Testbench Together---")
     all_files = state.get("final_files", []) + state.get("testbench_files", [])
-    lint_result = run_syntax_lint(all_files)
+    lint_result = run_syntax_lint(all_files, state.get("require_lint", False))
     write_text_artifact("logs/final_lint_report.txt", lint_result["report"])
-    return {"final_lint_report": lint_result["report"]}
+    if lint_result["passed"]:
+        return {
+            "final_lint_passed": True,
+            "final_lint_report": lint_result["report"],
+            "failed_stage": "",
+            "blocking_report": "",
+        }
+    return {
+        "final_lint_passed": False,
+        "final_lint_report": lint_result["report"],
+        "failed_stage": "final_lint",
+        "blocking_report": lint_result["report"],
+    }
 
 
 def final_review_agent(state: AgentState):
     if os.getenv("AUTO_APPROVE_FINAL", "").strip().lower() in {"1", "true", "yes"}:
-        return {"human_approved": True}
+        return {"human_approved": True, "run_status": "passed"}
 
     all_files = state.get("final_files", []) + state.get("testbench_files", [])
     print("\n" + "-" * 20 + " FINAL REVIEW " + "-" * 20)
@@ -1565,18 +1764,39 @@ def final_review_agent(state: AgentState):
     feedback = input("Write files? (approve / reject): ").strip().lower()
     if feedback == "approve":
         write_text_artifact("logs/final_human_approval.txt", "approve")
-        return {"human_approved": True}
+        return {"human_approved": True, "run_status": "passed"}
 
     write_text_artifact("logs/final_human_approval.txt", feedback or "reject")
     return {
         "human_approved": False,
+        "run_status": "failed",
+        "failed_stage": "final_review",
+        "blocking_report": f"Final human approval rejected: {feedback or 'reject'}",
         "verification_report": f"Final human approval rejected: {feedback or 'reject'}",
     }
 
 
 def summary_agent(state: AgentState):
     print("---SUMMARY: Writing Run Summary---")
+    failed_stage = state.get("failed_stage", "")
+    run_status = state.get("run_status", "")
+    if not run_status:
+        if state.get("human_approved"):
+            run_status = "passed"
+        elif failed_stage:
+            run_status = "failed"
+        else:
+            run_status = "not_written"
+    blocking_report = (
+        state.get("blocking_report")
+        or state.get("verification_report")
+        or state.get("final_lint_report")
+        or ""
+    )
     summary = {
+        "run_status": run_status,
+        "failed_stage": failed_stage,
+        "blocking_report": blocking_report,
         "llm_config": active_llm_config,
         "llm_config_saved": str(ARTIFACT_DIR / "llm_config.json"),
         "user_request_saved": str(ARTIFACT_DIR / "user_requirement.txt"),
@@ -1596,7 +1816,18 @@ def summary_agent(state: AgentState):
         "human_approved": state.get("human_approved", False),
         "last_verification_report": state.get("verification_report", ""),
         "last_lint_report": state.get("lint_report", ""),
+        "require_lint": state.get("require_lint", False),
+        "final_lint_passed": state.get("final_lint_passed", False),
         "final_lint_report": state.get("final_lint_report", ""),
+        "retry_counts": {
+            "architecture": state.get("architecture_retry_count", 0),
+            "supervisor": state.get("supervisor_retry_count", 0),
+            "control_datapath": state.get("control_datapath_retry_count", 0),
+            "coding": state.get("coding_retry_count", 0),
+            "microarchitecture": state.get("microarchitecture_retry_count", 0),
+            "verification": state.get("verification_retry_count", 0),
+            "testbench": state.get("testbench_retry_count", 0),
+        },
         "logs_dir": str(ARTIFACT_DIR / "logs"),
         "failed_attempts_dir": str(ARTIFACT_DIR / "failed_attempts"),
     }
@@ -1636,8 +1867,9 @@ writer_tool_node = ToolNode(writer_tools)
 def coding_condition(state: AgentState):
     if state.get("generation_ok"):
         return "microarch_review"
-    if state.get("retry_count", 0) >= state.get("max_retries", 3):
-        return "write"
+    if state.get("coding_retry_count", 0) >= state.get("max_retries", 3):
+        print("---CONDITION: Max coding retries reached. Failing run before final review.---")
+        return "fail"
     return "retry"
 
 
@@ -1659,21 +1891,30 @@ def supervisor_review_condition(state: AgentState):
     return "retry"
 
 
+def control_datapath_review_condition(state: AgentState):
+    if state.get("control_datapath_review_passed"):
+        return "coding"
+    if state.get("control_datapath_retry_count", 0) >= state.get("max_control_datapath_retries", 2):
+        print("---CONDITION: Max Control/Data Path review retries reached. Continuing with latest plan.---")
+        return "coding"
+    return "retry"
+
+
 def microarchitecture_condition(state: AgentState):
     if state.get("microarchitecture_passed"):
         return "verify"
-    if state.get("retry_count", 0) >= state.get("max_retries", 3):
-        print("---CONDITION: Max retries reached during microarchitecture review.---")
-        return "write"
+    if state.get("microarchitecture_retry_count", 0) >= state.get("max_retries", 3):
+        print("---CONDITION: Max microarchitecture retries reached. Failing run before final review.---")
+        return "fail"
     return "retry"
 
 
 def verification_condition(state: AgentState):
     if state.get("verification_passed"):
         return "accept"
-    if state.get("retry_count", 0) >= state.get("max_retries", 3):
-        print("---CONDITION: Max retries reached. Writing last accepted RTL only.---")
-        return "write"
+    if state.get("verification_retry_count", 0) >= state.get("max_retries", 3):
+        print("---CONDITION: Max verification retries reached. Failing run before final review.---")
+        return "fail"
     return "retry"
 
 
@@ -1686,13 +1927,26 @@ def next_task_condition(state: AgentState):
 
 
 def testbench_condition(state: AgentState):
-    return "final_lint"
+    if state.get("generation_ok"):
+        return "final_lint"
+    if state.get("testbench_retry_count", 0) >= state.get("max_testbench_retries", 2):
+        print("---CONDITION: Max testbench retries reached. Failing run before final lint.---")
+        return "fail"
+    return "retry"
+
+
+def final_lint_condition(state: AgentState):
+    if state.get("final_lint_passed"):
+        return "review"
+    print("---CONDITION: Final lint failed. Failing run before writer.---")
+    return "fail"
 
 
 def final_review_condition(state: AgentState):
     if state.get("human_approved"):
         return "write"
     return "summary"
+
 
 
 # --- 6. Build the LangGraph Workflow ---
@@ -1705,6 +1959,7 @@ workflow.add_node("architecture_review", architecture_review_agent)
 workflow.add_node("supervisor", supervisor_agent)
 workflow.add_node("supervisor_review", supervisor_review_agent)
 workflow.add_node("control_datapath_planner", control_datapath_planner_agent)
+workflow.add_node("control_datapath_review", control_datapath_review_agent)
 workflow.add_node("verilog_coding_team", verilog_coding_team_agent)
 workflow.add_node("microarchitecture_reviewer", microarchitecture_reviewer_agent)
 workflow.add_node("verification_team", verification_team_agent)
@@ -1732,25 +1987,30 @@ workflow.add_conditional_edges(
     supervisor_review_condition,
     {"control_datapath": "control_datapath_planner", "retry": "supervisor"},
 )
-workflow.add_edge("control_datapath_planner", "verilog_coding_team")
+workflow.add_edge("control_datapath_planner", "control_datapath_review")
+workflow.add_conditional_edges(
+    "control_datapath_review",
+    control_datapath_review_condition,
+    {"coding": "verilog_coding_team", "retry": "control_datapath_planner"},
+)
 workflow.add_conditional_edges(
     "verilog_coding_team",
     coding_condition,
     {
         "microarch_review": "microarchitecture_reviewer",
         "retry": "verilog_coding_team",
-        "write": "final_review",
+        "fail": "summary",
     },
 )
 workflow.add_conditional_edges(
     "microarchitecture_reviewer",
     microarchitecture_condition,
-    {"verify": "verification_team", "retry": "verilog_coding_team", "write": "final_review"},
+    {"verify": "verification_team", "retry": "verilog_coding_team", "fail": "summary"},
 )
 workflow.add_conditional_edges(
     "verification_team",
     verification_condition,
-    {"accept": "supervisor_accept", "retry": "verilog_coding_team", "write": "final_review"},
+    {"accept": "supervisor_accept", "retry": "verilog_coding_team", "fail": "summary"},
 )
 workflow.add_conditional_edges(
     "supervisor_accept",
@@ -1760,9 +2020,13 @@ workflow.add_conditional_edges(
 workflow.add_conditional_edges(
     "testbench_team",
     testbench_condition,
-    {"final_lint": "final_lint"},
+    {"final_lint": "final_lint", "retry": "testbench_team", "fail": "summary"},
 )
-workflow.add_edge("final_lint", "final_review")
+workflow.add_conditional_edges(
+    "final_lint",
+    final_lint_condition,
+    {"review": "final_review", "fail": "summary"},
+)
 workflow.add_conditional_edges(
     "final_review",
     final_review_condition,
@@ -1820,8 +2084,17 @@ if __name__ == "__main__":
         "supervisor_retry_count": 0,
         "max_supervisor_retries": 2,
         "control_datapath_plan": "",
+        "control_datapath_review_passed": False,
+        "control_datapath_review_report": "",
+        "control_datapath_retry_count": 0,
+        "max_control_datapath_retries": 2,
         "microarchitecture_passed": False,
         "microarchitecture_report": "",
+        "coding_retry_count": 0,
+        "microarchitecture_retry_count": 0,
+        "verification_retry_count": 0,
+        "testbench_retry_count": 0,
+        "max_testbench_retries": 2,
         "rtl_context": "",
         "candidate_files": [],
         "final_files": [],
@@ -1830,11 +2103,15 @@ if __name__ == "__main__":
         "verification_passed": False,
         "verification_report": "",
         "lint_report": "",
+        "require_lint": args.require_lint,
+        "final_lint_passed": False,
         "final_lint_report": "",
         "human_approved": False,
         "skip_testbench": args.no_testbench,
-        "retry_count": 0,
         "max_retries": args.max_retries,
+        "run_status": "",
+        "failed_stage": "",
+        "blocking_report": "",
         "generation_ok": False,
         "error_message": "",
     }

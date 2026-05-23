@@ -59,8 +59,9 @@ Options:
 
 - `--spec`: RTL requirement text or a path to a requirement file.
 - `--auto-approve`: Skip the final manual approval prompt.
-- `--max-retries`: Maximum coding retries per Manager task.
+- `--max-retries`: Maximum retries per coding, microarchitecture review, and verification stage.
 - `--no-testbench`: Skip smoke testbench generation and produce RTL only.
+- `--require-lint`: Fail the run if neither `verilator` nor `iverilog` is installed.
 - `--llm-provider`: `ollama` or `gpt-oss`.
 - `--llm-model`: Model name such as `gpt-oss`, `gpt-oss:20b`, `gpt-oss:120b`, or another Ollama model.
 - `--llm-temperature`: Model temperature.
@@ -80,6 +81,7 @@ Important artifacts:
 - `generated_rtl/logs/architecture_review_attempt_*.md`
 - `generated_rtl/logs/*_supervisor_review_attempt_*.md`
 - `generated_rtl/logs/*_control_datapath_plan.md`
+- `generated_rtl/logs/*_control_datapath_review_attempt_*.md`
 - `generated_rtl/logs/*_microarchitecture_review_attempt_*.md`
 - `generated_rtl/compile_order.f`
 - `generated_rtl/file_manifest.json`
@@ -88,4 +90,8 @@ Important artifacts:
 - `generated_rtl/failed_attempts/`
 
 If `verilator` or `iverilog` is installed, syntax lint runs automatically. If neither
-tool is available, lint is skipped and the skip is recorded in the logs.
+tool is available, lint is skipped and the skip is recorded in the logs. Use
+`--require-lint` when lint tool availability should be a blocking quality gate.
+
+`generated_rtl/run_summary.json` includes `run_status`, `failed_stage`,
+`blocking_report`, final lint status, and stage-specific retry counts.
