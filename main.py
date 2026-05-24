@@ -10,14 +10,51 @@ import tempfile
 from pathlib import Path
 from typing import Annotated, Dict, List, TypedDict
 
+
+def positive_int(raw_value: str) -> int:
+    value = int(raw_value)
+    if value < 0:
+        raise argparse.ArgumentTypeError("value must be 0 or greater")
+    return value
+
+
 if any(arg in {"-h", "--help"} for arg in sys.argv[1:]):
     help_parser = argparse.ArgumentParser(description="Run the Verilog coding agent.")
     help_parser.add_argument("--spec", help="RTL requirement text or path to a requirement file.")
     help_parser.add_argument(
         "--max-retries",
-        type=int,
+        type=positive_int,
         default=3,
         help="Maximum retries per coding, microarchitecture review, and verification stage.",
+    )
+    help_parser.add_argument(
+        "--max-architecture-retries",
+        type=positive_int,
+        default=2,
+        help="Maximum architecture review retries.",
+    )
+    help_parser.add_argument(
+        "--max-supervisor-retries",
+        type=positive_int,
+        default=2,
+        help="Maximum Supervisor review retries.",
+    )
+    help_parser.add_argument(
+        "--max-control-datapath-retries",
+        type=positive_int,
+        default=2,
+        help="Maximum Control/Data Path plan review retries.",
+    )
+    help_parser.add_argument(
+        "--max-testbench-retries",
+        type=positive_int,
+        default=2,
+        help="Maximum smoke testbench generation retries.",
+    )
+    help_parser.add_argument(
+        "--artifact-dir",
+        default=os.getenv("ARTIFACT_DIR", "generated_rtl"),
+        help="Directory for generated artifacts and logs.",
     )
     help_parser.add_argument(
         "--auto-approve",
@@ -232,7 +269,7 @@ def llm_config(
 llm = create_llm()
 active_llm_config = llm_config()
 writer_tools = [write_verilog_file]
-ARTIFACT_DIR = Path("generated_rtl")
+ARTIFACT_DIR = Path(os.getenv("ARTIFACT_DIR", "generated_rtl"))
 
 
 def _strip_json_fence(raw_content: str) -> str:
@@ -297,12 +334,17 @@ def _json_bool(value: object) -> bool:
 def validate_plan(plan: object):
     if not isinstance(plan, list) or not plan:
         return False, "Manager plan must be a non-empty JSON list."
+    seen_ids = set()
     for idx, task in enumerate(plan):
         if not isinstance(task, dict):
             return False, f"Task {idx} must be an object."
         for key in ("id", "title", "goal", "deliverable"):
             if key not in task or not isinstance(task[key], str) or not task[key].strip():
                 return False, f"Task {idx} must include a non-empty '{key}'."
+        task_id = task["id"].strip()
+        if task_id in seen_ids:
+            return False, f"Task id '{task_id}' is duplicated."
+        seen_ids.add(task_id)
     return True, ""
 
 
@@ -365,6 +407,7 @@ def current_manager_handoff(state: "AgentState") -> str:
 def validate_generated_files(files: object):
     if not isinstance(files, list) or not files:
         return False, "Coding output must be a non-empty JSON list."
+    seen_filenames = set()
     for idx, file_info in enumerate(files):
         if not isinstance(file_info, dict):
             return False, f"Item {idx} must be an object."
@@ -373,12 +416,22 @@ def validate_generated_files(files: object):
         if not isinstance(file_info["filename"], str) or not file_info["filename"].strip():
             return False, f"Item {idx} has an invalid filename."
         filename = file_info["filename"].strip()
+        if filename in seen_filenames:
+            return False, f"Item {idx} duplicates filename '{filename}'."
+        seen_filenames.add(filename)
         if Path(filename).name != filename:
             return False, f"Item {idx} filename must not include path segments."
         if Path(filename).suffix.lower() not in {".v", ".sv", ".vh", ".svh"}:
             return False, f"Item {idx} has unsupported extension."
-        if not isinstance(file_info["content"], str):
+        if not isinstance(file_info["content"], str) or not file_info["content"].strip():
             return False, f"Item {idx} has invalid content."
+        content = file_info["content"]
+        if any(marker in content for marker in ("<<<<<<<", "=======", ">>>>>>>")):
+            return False, f"Item {idx} contains unresolved conflict markers."
+        if Path(filename).suffix.lower() in {".v", ".sv"} and not re.search(
+            r"\b(module|interface|package|primitive)\b", content
+        ):
+            return False, f"Item {idx} source file must contain a Verilog/SystemVerilog design unit."
     return True, ""
 
 
@@ -387,9 +440,38 @@ def parse_args():
     parser.add_argument("--spec", help="RTL requirement text or path to a requirement file.")
     parser.add_argument(
         "--max-retries",
-        type=int,
+        type=positive_int,
         default=3,
         help="Maximum retries per coding, microarchitecture review, and verification stage.",
+    )
+    parser.add_argument(
+        "--max-architecture-retries",
+        type=positive_int,
+        default=2,
+        help="Maximum architecture review retries.",
+    )
+    parser.add_argument(
+        "--max-supervisor-retries",
+        type=positive_int,
+        default=2,
+        help="Maximum Supervisor review retries.",
+    )
+    parser.add_argument(
+        "--max-control-datapath-retries",
+        type=positive_int,
+        default=2,
+        help="Maximum Control/Data Path plan review retries.",
+    )
+    parser.add_argument(
+        "--max-testbench-retries",
+        type=positive_int,
+        default=2,
+        help="Maximum smoke testbench generation retries.",
+    )
+    parser.add_argument(
+        "--artifact-dir",
+        default=str(ARTIFACT_DIR),
+        help="Directory for generated artifacts and logs.",
     )
     parser.add_argument(
         "--auto-approve",
@@ -462,6 +544,55 @@ def extract_module_name_counts(files: List[Dict[str, str]]) -> Dict[str, int]:
     return counts
 
 
+def extract_instantiated_modules(files: List[Dict[str, str]]) -> List[str]:
+    primitive_or_keyword = {
+        "always",
+        "and",
+        "assign",
+        "begin",
+        "case",
+        "buf",
+        "bufif0",
+        "bufif1",
+        "else",
+        "end",
+        "for",
+        "function",
+        "generate",
+        "if",
+        "initial",
+        "module",
+        "nand",
+        "nor",
+        "not",
+        "notif0",
+        "notif1",
+        "or",
+        "primitive",
+        "pulldown",
+        "pullup",
+        "tran",
+        "tranif0",
+        "tranif1",
+        "task",
+        "wire",
+        "xnor",
+        "xor",
+    }
+    instances = []
+    pattern = re.compile(
+        r"^\s*([a-zA-Z_][a-zA-Z0-9_$]*)\s*(?:#\s*\([^;]*?\)\s*)?"
+        r"([a-zA-Z_][a-zA-Z0-9_$]*)\s*\(",
+        flags=re.M | re.S,
+    )
+    for file_info in files:
+        content = re.sub(r"//.*?$|/\*.*?\*/", "", file_info["content"], flags=re.S | re.M)
+        for module_name, _instance_name in pattern.findall(content):
+            if module_name not in primitive_or_keyword and module_name not in instances:
+                instances.append(module_name)
+    return instances
+
+
 def build_file_manifest(files: List[Dict[str, str]]) -> List[Dict[str, object]]:
     manifest = []
     for file_info in files:
@@ -484,6 +615,7 @@ def write_compile_order(files: List[Dict[str, str]]):
 def basic_rtl_sanity(files: List[Dict[str, str]]) -> Dict[str, object]:
     issues = []
     module_counts = extract_module_name_counts(files)
+    defined_modules = set(module_counts)
     for module_name, count in module_counts.items():
         if count > 1:
             issues.append(f"duplicate module definition: {module_name} appears {count} times")
@@ -491,6 +623,8 @@ def basic_rtl_sanity(files: List[Dict[str, str]]) -> Dict[str, object]:
     for file_info in files:
         filename = file_info["filename"]
         content = file_info["content"]
+        if any(marker in content for marker in ("<<<<<<<", "=======", ">>>>>>>")):
+            issues.append(f"{filename}: unresolved conflict marker found")
         module_count = len(re.findall(r"\bmodule\b", content))
         endmodule_count = len(re.findall(r"\bendmodule\b", content))
         if module_count != endmodule_count:
@@ -499,6 +633,10 @@ def basic_rtl_sanity(files: List[Dict[str, str]]) -> Dict[str, object]:
             )
         if re.search(r"\bassign\s+[^;]+(?=\n)", content):
             issues.append(f"{filename}: possible assign statement missing semicolon")
+
+    for instance_module in extract_instantiated_modules(files):
+        if instance_module not in defined_modules:
+            issues.append(f"unresolved module instantiation: {instance_module}")
 
     if issues:
         return {"passed": False, "report": "\n".join(issues)}
@@ -1797,6 +1935,7 @@ def summary_agent(state: AgentState):
         "run_status": run_status,
         "failed_stage": failed_stage,
         "blocking_report": blocking_report,
+        "artifact_dir": str(ARTIFACT_DIR),
         "llm_config": active_llm_config,
         "llm_config_saved": str(ARTIFACT_DIR / "llm_config.json"),
         "user_request_saved": str(ARTIFACT_DIR / "user_requirement.txt"),
@@ -1827,6 +1966,15 @@ def summary_agent(state: AgentState):
             "microarchitecture": state.get("microarchitecture_retry_count", 0),
             "verification": state.get("verification_retry_count", 0),
             "testbench": state.get("testbench_retry_count", 0),
+        },
+        "retry_limits": {
+            "architecture": state.get("max_architecture_retries", 0),
+            "supervisor": state.get("max_supervisor_retries", 0),
+            "control_datapath": state.get("max_control_datapath_retries", 0),
+            "coding": state.get("max_retries", 0),
+            "microarchitecture": state.get("max_retries", 0),
+            "verification": state.get("max_retries", 0),
+            "testbench": state.get("max_testbench_retries", 0),
         },
         "logs_dir": str(ARTIFACT_DIR / "logs"),
         "failed_attempts_dir": str(ARTIFACT_DIR / "failed_attempts"),
@@ -2046,6 +2194,7 @@ app = workflow.compile()
 # --- 7. Run the Application ---
 if __name__ == "__main__":
     args = parse_args()
+    ARTIFACT_DIR = Path(args.artifact_dir)
     llm = create_llm(
         args.llm_provider,
         args.llm_model,
@@ -2076,25 +2225,25 @@ if __name__ == "__main__":
         "architecture_review_passed": False,
         "architecture_review_report": "",
         "architecture_retry_count": 0,
-        "max_architecture_retries": 2,
+        "max_architecture_retries": args.max_architecture_retries,
         "current_task_index": 0,
         "supervisor_plan": "",
         "supervisor_review_passed": False,
         "supervisor_review_report": "",
         "supervisor_retry_count": 0,
-        "max_supervisor_retries": 2,
+        "max_supervisor_retries": args.max_supervisor_retries,
         "control_datapath_plan": "",
         "control_datapath_review_passed": False,
         "control_datapath_review_report": "",
         "control_datapath_retry_count": 0,
-        "max_control_datapath_retries": 2,
+        "max_control_datapath_retries": args.max_control_datapath_retries,
         "microarchitecture_passed": False,
         "microarchitecture_report": "",
         "coding_retry_count": 0,
         "microarchitecture_retry_count": 0,
         "verification_retry_count": 0,
         "testbench_retry_count": 0,
-        "max_testbench_retries": 2,
+        "max_testbench_retries": args.max_testbench_retries,
         "rtl_context": "",
         "candidate_files": [],
         "final_files": [],
