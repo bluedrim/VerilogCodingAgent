@@ -15,6 +15,30 @@ requirement file path such as `@spec.txt`.
 python3 main.py --spec spec.txt --auto-approve --max-retries 3
 ```
 
+## OpenAI account run
+
+Use `openai` when you want the agent to call models through your OpenAI account API key.
+The Codex app login token is not read by this script; provide an API key through
+`OPENAI_API_KEY`, `.env`, or `--llm-api-key`.
+
+```bash
+python3 main.py \
+  --llm-provider openai \
+  --llm-model gpt-4.1 \
+  --llm-api-key YOUR_OPENAI_API_KEY \
+  --spec spec.txt \
+  --auto-approve
+```
+
+`.env` example:
+
+```bash
+LLM_PROVIDER=openai
+OPENAI_MODEL=gpt-4.1
+OPENAI_API_KEY=YOUR_OPENAI_API_KEY
+LLM_TEMPERATURE=0.1
+```
+
 ## gpt-oss run
 
 The `gpt-oss` option can use Ollama locally or an OpenAI-compatible
@@ -73,11 +97,11 @@ Options:
 - `--max-user-request-chars`: Maximum accepted characters for the user requirement.
 - `--max-manager-tasks`: Maximum number of Manager tasks accepted from planning.
 - `--artifact-dir`: Directory for generated artifacts and logs.
-- `--llm-provider`: `ollama` or `gpt-oss`.
-- `--llm-model`: Model name such as `gpt-oss`, `gpt-oss:20b`, `gpt-oss:120b`, or another Ollama model.
+- `--llm-provider`: `ollama`, `gpt-oss`, or `openai`.
+- `--llm-model`: Model name such as `gpt-4.1`, `gpt-oss`, `gpt-oss:20b`, `gpt-oss:120b`, or another Ollama model.
 - `--llm-temperature`: Model temperature.
 - `--llm-api-url`: OpenAI-compatible chat completions URL.
-- `--llm-api-key`: API key for the remote endpoint. The saved config redacts it.
+- `--llm-api-key`: API key for OpenAI or the remote endpoint. The saved config redacts it.
 
 ## Outputs
 

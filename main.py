@@ -108,16 +108,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--llm-provider",
-        choices=["ollama", "gpt-oss"],
-        help="LLM provider/backend. 'gpt-oss' supports Ollama or OpenAI-compatible endpoints.",
+        choices=["ollama", "gpt-oss", "openai"],
+        help="LLM provider/backend. 'openai' uses the current account API key from OPENAI_API_KEY or --llm-api-key.",
     )
-    parser.add_argument("--llm-model", help="LLM model name, for example gpt-oss:20b.")
+    parser.add_argument("--llm-model", help="LLM model name, for example gpt-oss:20b or gpt-4.1.")
     parser.add_argument("--llm-temperature", type=float, help="LLM temperature.")
     parser.add_argument(
         "--llm-api-url",
         help="OpenAI-compatible chat completions URL, for example http://abc.net:30001/chat/completions.",
     )
-    parser.add_argument("--llm-api-key", help="API key for an OpenAI-compatible gpt-oss endpoint.")
+    parser.add_argument("--llm-api-key", help="API key for OpenAI or an OpenAI-compatible endpoint.")
     return parser
 
 
@@ -223,16 +223,27 @@ def resolve_llm_settings(
         temperature if temperature is not None else float(os.getenv("LLM_TEMPERATURE", "0.1"))
     )
     resolved_api_url = api_url or os.getenv("GPT_OSS_API_URL") or os.getenv("LLM_API_URL") or ""
-    resolved_api_key = api_key or os.getenv("GPT_OSS_API_KEY") or os.getenv("LLM_API_KEY") or ""
+    resolved_api_key = (
+        api_key
+        or os.getenv("OPENAI_API_KEY")
+        or os.getenv("GPT_OSS_API_KEY")
+        or os.getenv("LLM_API_KEY")
+        or ""
+    )
 
     if resolved_provider == "gpt-oss":
         resolved_model = model or os.getenv("GPT_OSS_MODEL") or os.getenv("LLM_MODEL") or "gpt-oss"
         backend = "openai-compatible" if resolved_api_url else "ollama"
+    elif resolved_provider == "openai":
+        resolved_model = model or os.getenv("OPENAI_MODEL") or os.getenv("LLM_MODEL") or "gpt-4.1"
+        backend = "openai"
     else:
         resolved_model = model or os.getenv("LLM_MODEL") or os.getenv("OLLAMA_MODEL") or "gpt-oss:20b"
         backend = resolved_provider
 
     if backend == "openai-compatible":
+        base_url = normalize_chat_completions_url(resolved_api_url)
+    elif backend == "openai":
         base_url = normalize_chat_completions_url(resolved_api_url)
     elif backend == "ollama":
         base_url = os.getenv("OLLAMA_BASE_URL", "")
@@ -279,22 +290,24 @@ def create_llm(
     model_name = str(settings["model"])
     resolved_temperature = float(settings["temperature"])
 
-    if backend == "openai-compatible":
+    if backend in {"openai", "openai-compatible"}:
         try:
             from langchain_openai import ChatOpenAI
         except ModuleNotFoundError as exc:
             print(f"Missing dependency: {exc.name}")
             print("Install project dependencies with: python3 -m pip install -r requirements.txt")
             sys.exit(1)
-        return ChatOpenAI(
-            model=model_name,
-            temperature=resolved_temperature,
-            base_url=str(settings["base_url"]),
-            api_key=str(settings["api_key"] or "dummy"),
-        )
+        kwargs = {
+            "model": model_name,
+            "temperature": resolved_temperature,
+            "api_key": str(settings["api_key"] or "dummy"),
+        }
+        if settings["base_url"]:
+            kwargs["base_url"] = str(settings["base_url"])
+        return ChatOpenAI(**kwargs)
 
     if backend != "ollama":
-        raise ValueError("Unsupported LLM backend. Supported backends: ollama, openai-compatible")
+        raise ValueError("Unsupported LLM backend. Supported backends: ollama, openai, openai-compatible")
 
     kwargs = {"model": model_name, "temperature": resolved_temperature}
     if settings["base_url"]:
