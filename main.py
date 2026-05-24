@@ -95,6 +95,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Maximum characters of RTL/context text sent to each LLM prompt.",
     )
     parser.add_argument(
+        "--max-user-request-chars",
+        type=positive_int,
+        default=200_000,
+        help="Maximum accepted characters for the user requirement.",
+    )
+    parser.add_argument(
+        "--max-manager-tasks",
+        type=positive_int,
+        default=32,
+        help="Maximum number of Manager tasks accepted from the planning step.",
+    )
+    parser.add_argument(
         "--llm-provider",
         choices=["ollama", "gpt-oss"],
         help="LLM provider/backend. 'gpt-oss' supports Ollama or OpenAI-compatible endpoints.",
@@ -181,6 +193,9 @@ class AgentState(TypedDict):
     blocking_report: str
     max_generated_file_bytes: int
     max_context_chars: int
+    max_user_request_chars: int
+    max_manager_tasks: int
+    manager_fallback_used: bool
     generation_ok: bool
     error_message: str
 
@@ -383,9 +398,11 @@ def _json_bool(value: object) -> bool:
     return False
 
 
-def validate_plan(plan: object):
+def validate_plan(plan: object, max_tasks: int = 32):
     if not isinstance(plan, list) or not plan:
         return False, "Manager plan must be a non-empty JSON list."
+    if max_tasks and len(plan) > max_tasks:
+        return False, f"Manager plan has {len(plan)} tasks, above limit {max_tasks}."
     seen_ids = set()
     for idx, task in enumerate(plan):
         if not isinstance(task, dict):
@@ -500,6 +517,18 @@ def validate_generated_files(files: object, max_file_bytes: int = 500_000):
         ):
             return False, f"Item {idx} source file must contain a Verilog/SystemVerilog design unit."
     return True, ""
+
+
+def normalize_generated_files(files: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    normalized = []
+    for file_info in files:
+        normalized.append(
+            {
+                "filename": str(file_info["filename"]).strip(),
+                "content": str(file_info["content"]).replace("\r\n", "\n").replace("\r", "\n"),
+            }
+        )
+    return normalized
 
 
 def parse_args():
@@ -625,8 +654,21 @@ def build_file_manifest(files: List[Dict[str, str]]) -> List[Dict[str, object]]:
     return manifest
 
 
+def hdl_sort_key(file_info: Dict[str, str]):
+    filename = file_info["filename"]
+    content = file_info["content"]
+    suffix = Path(filename).suffix.lower()
+    if suffix in {".vh", ".svh"}:
+        group = 0
+    elif re.search(r"\bpackage\b", content):
+        group = 1
+    else:
+        group = 2
+    return group, filename
+
+
 def write_compile_order(files: List[Dict[str, str]]):
-    compile_order = "\n".join(file_info["filename"] for file_info in files)
+    compile_order = "\n".join(file_info["filename"] for file_info in sorted(files, key=hdl_sort_key))
     write_text_artifact("compile_order.f", compile_order + ("\n" if compile_order else ""))
 
 
@@ -787,6 +829,14 @@ def intake_agent(state: AgentState):
     if user_request_input.lower() == "exit":
         sys.exit("Exiting.")
     user_request = read_user_requirement(user_request_input)
+    max_chars = state.get("max_user_request_chars", 200_000)
+    if max_chars and len(user_request) > max_chars:
+        message = (
+            f"User requirement has {len(user_request)} characters, above limit {max_chars}. "
+            "Use --max-user-request-chars to raise the limit."
+        )
+        write_text_artifact("failed_attempts/user_requirement_too_large.txt", message)
+        sys.exit(message)
     write_text_artifact("user_requirement.txt", user_request)
     write_json_artifact("llm_config.json", active_llm_config)
     return {
@@ -827,7 +877,7 @@ Rules:
 
     try:
         plan = _load_json(response.content)
-        is_valid, validation_error = validate_plan(plan)
+        is_valid, validation_error = validate_plan(plan, state.get("max_manager_tasks", 32))
         if not is_valid:
             raise ValueError(validation_error)
         print(f"---MANAGER: Planned {len(plan)} tasks.---")
@@ -836,6 +886,7 @@ Rules:
             "manager_plan": plan,
             "current_task_index": 0,
             "messages": [response],
+            "manager_fallback_used": False,
             "error_message": "",
         }
     except (json.JSONDecodeError, ValueError) as exc:
@@ -865,6 +916,7 @@ Rules:
             "manager_plan": fallback_plan,
             "current_task_index": 0,
             "messages": [response],
+            "manager_fallback_used": True,
             "error_message": f"Manager plan fallback used: {exc}",
         }
 
@@ -1497,6 +1549,7 @@ Current RTL files:
 
     try:
         files = _load_json(response.content)
+        files = normalize_generated_files(files)
         is_valid, validation_error = validate_generated_files(
             files, state.get("max_generated_file_bytes", 500_000)
         )
@@ -1884,6 +1937,7 @@ Top module candidates, in observed order:
 
     try:
         files = _load_json(response.content)
+        files = normalize_generated_files(files)
         is_valid, validation_error = validate_generated_files(
             files, state.get("max_generated_file_bytes", 500_000)
         )
@@ -1990,6 +2044,13 @@ def summary_agent(state: AgentState):
         "llm_config_saved": str(ARTIFACT_DIR / "llm_config.json"),
         "user_request_saved": str(ARTIFACT_DIR / "user_requirement.txt"),
         "manager_plan_saved": str(ARTIFACT_DIR / "manager_plan.json"),
+        "manager_task_count": len(state.get("manager_plan", [])),
+        "manager_fallback_used": state.get("manager_fallback_used", False),
+        "accepted_task_count": state.get("current_task_index", 0),
+        "pending_task_count": max(
+            len(state.get("manager_plan", [])) - state.get("current_task_index", 0),
+            0,
+        ),
         "architecture_contract_saved": str(ARTIFACT_DIR / "architecture_contract.md"),
         "last_architecture_review_report": state.get("architecture_review_report", ""),
         "last_supervisor_review_report": state.get("supervisor_review_report", ""),
@@ -2010,6 +2071,8 @@ def summary_agent(state: AgentState):
         "allow_blackboxes": state.get("allow_blackboxes", False),
         "max_generated_file_bytes": state.get("max_generated_file_bytes", 0),
         "max_context_chars": state.get("max_context_chars", 0),
+        "max_user_request_chars": state.get("max_user_request_chars", 0),
+        "max_manager_tasks": state.get("max_manager_tasks", 0),
         "final_lint_passed": state.get("final_lint_passed", False),
         "final_lint_report": state.get("final_lint_report", ""),
         "retry_counts": {
@@ -2276,6 +2339,8 @@ if __name__ == "__main__":
         "allow_blackboxes": args.allow_blackboxes,
         "max_generated_file_bytes": args.max_generated_file_bytes,
         "max_context_chars": args.max_context_chars,
+        "max_user_request_chars": args.max_user_request_chars,
+        "max_manager_tasks": args.max_manager_tasks,
         "retry_limits": {
             "architecture": args.max_architecture_retries,
             "supervisor": args.max_supervisor_retries,
@@ -2342,6 +2407,9 @@ if __name__ == "__main__":
         "blocking_report": "",
         "max_generated_file_bytes": args.max_generated_file_bytes,
         "max_context_chars": args.max_context_chars,
+        "max_user_request_chars": args.max_user_request_chars,
+        "max_manager_tasks": args.max_manager_tasks,
+        "manager_fallback_used": False,
         "generation_ok": False,
         "error_message": "",
     }
