@@ -66,6 +66,9 @@ Options:
 - `--max-testbench-retries`: Maximum smoke testbench generation retries.
 - `--no-testbench`: Skip smoke testbench generation and produce RTL only.
 - `--require-lint`: Fail the run if neither `verilator` nor `iverilog` is installed.
+- `--lint-timeout`: Syntax lint timeout in seconds.
+- `--allow-blackboxes`: Allow unresolved module instantiations in static sanity checks.
+- `--max-generated-file-bytes`: Maximum allowed bytes per generated RTL/testbench file.
 - `--artifact-dir`: Directory for generated artifacts and logs.
 - `--llm-provider`: `ollama` or `gpt-oss`.
 - `--llm-model`: Model name such as `gpt-oss`, `gpt-oss:20b`, `gpt-oss:120b`, or another Ollama model.
@@ -81,6 +84,7 @@ Important artifacts:
 
 - `generated_rtl/user_requirement.txt`
 - `generated_rtl/llm_config.json`
+- `generated_rtl/execution_config.json`
 - `generated_rtl/manager_plan.json`
 - `generated_rtl/architecture_contract.md`
 - `generated_rtl/logs/architecture_review_attempt_*.md`
@@ -99,5 +103,6 @@ tool is available, lint is skipped and the skip is recorded in the logs. Use
 `--require-lint` when lint tool availability should be a blocking quality gate.
 
 `generated_rtl/run_summary.json` includes `run_status`, `failed_stage`,
-`blocking_report`, artifact directory, retry limits, final lint status, and
-stage-specific retry counts.
+`blocking_report`, artifact directory, lint policy, blackbox policy, generated
+file size limit, retry limits, final lint status, and stage-specific retry
+counts.

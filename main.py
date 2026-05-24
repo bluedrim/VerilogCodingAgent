@@ -72,6 +72,23 @@ if any(arg in {"-h", "--help"} for arg in sys.argv[1:]):
         help="Fail when neither verilator nor iverilog is installed.",
     )
     help_parser.add_argument(
+        "--lint-timeout",
+        type=positive_int,
+        default=30,
+        help="Syntax lint timeout in seconds.",
+    )
+    help_parser.add_argument(
+        "--allow-blackboxes",
+        action="store_true",
+        help="Allow unresolved module instantiations in static sanity checks.",
+    )
+    help_parser.add_argument(
+        "--max-generated-file-bytes",
+        type=positive_int,
+        default=500_000,
+        help="Maximum allowed bytes per generated RTL/testbench file.",
+    )
+    help_parser.add_argument(
         "--llm-provider",
         choices=["ollama", "gpt-oss"],
         help="LLM provider/backend. 'gpt-oss' supports Ollama or OpenAI-compatible endpoints.",
@@ -142,6 +159,8 @@ class AgentState(TypedDict):
     verification_report: str
     lint_report: str
     require_lint: bool
+    lint_timeout_seconds: int
+    allow_blackboxes: bool
     final_lint_passed: bool
     final_lint_report: str
     human_approved: bool
@@ -150,6 +169,7 @@ class AgentState(TypedDict):
     run_status: str
     failed_stage: str
     blocking_report: str
+    max_generated_file_bytes: int
     generation_ok: bool
     error_message: str
 
@@ -272,6 +292,21 @@ writer_tools = [write_verilog_file]
 ARTIFACT_DIR = Path(os.getenv("ARTIFACT_DIR", "generated_rtl"))
 
 
+def sanitize_artifact_name(value: object, fallback: str = "item") -> str:
+    text = str(value or "").strip()
+    text = re.sub(r"[^a-zA-Z0-9_.-]+", "_", text).strip("._")
+    return text or fallback
+
+
+def artifact_path(relative_path: str) -> Path:
+    candidate = ARTIFACT_DIR / relative_path
+    try:
+        candidate.resolve().relative_to(ARTIFACT_DIR.resolve())
+    except ValueError as exc:
+        raise ValueError(f"Artifact path escapes artifact directory: {relative_path}") from exc
+    return candidate
+
+
 def _strip_json_fence(raw_content: str) -> str:
     content = raw_content.strip()
     if content.startswith("```json"):
@@ -285,8 +320,6 @@ def _strip_json_fence(raw_content: str) -> str:
 
 def _extract_json_candidate(raw_content: str) -> str:
     content = _strip_json_fence(raw_content)
-    if content.startswith("[") or content.startswith("{"):
-        return content
 
     for opener, closer in (("[", "]"), ("{", "}")):
         start = content.find(opener)
@@ -404,7 +437,7 @@ def current_manager_handoff(state: "AgentState") -> str:
     )
 
 
-def validate_generated_files(files: object):
+def validate_generated_files(files: object, max_file_bytes: int = 500_000):
     if not isinstance(files, list) or not files:
         return False, "Coding output must be a non-empty JSON list."
     seen_filenames = set()
@@ -426,6 +459,8 @@ def validate_generated_files(files: object):
         if not isinstance(file_info["content"], str) or not file_info["content"].strip():
             return False, f"Item {idx} has invalid content."
         content = file_info["content"]
+        if len(content.encode()) > max_file_bytes:
+            return False, f"Item {idx} exceeds max file size of {max_file_bytes} bytes."
         if any(marker in content for marker in ("<<<<<<<", "=======", ">>>>>>>")):
             return False, f"Item {idx} contains unresolved conflict markers."
         if Path(filename).suffix.lower() in {".v", ".sv"} and not re.search(
@@ -489,6 +524,23 @@ def parse_args():
         help="Fail when neither verilator nor iverilog is installed.",
     )
     parser.add_argument(
+        "--lint-timeout",
+        type=positive_int,
+        default=30,
+        help="Syntax lint timeout in seconds.",
+    )
+    parser.add_argument(
+        "--allow-blackboxes",
+        action="store_true",
+        help="Allow unresolved module instantiations in static sanity checks.",
+    )
+    parser.add_argument(
+        "--max-generated-file-bytes",
+        type=positive_int,
+        default=500_000,
+        help="Maximum allowed bytes per generated RTL/testbench file.",
+    )
+    parser.add_argument(
         "--llm-provider",
         choices=["ollama", "gpt-oss"],
         help="LLM provider/backend. 'gpt-oss' supports Ollama or OpenAI-compatible endpoints.",
@@ -508,13 +560,16 @@ def read_user_requirement(raw_input: str) -> str:
         raw_input = raw_input[1:].strip()
 
     possible_path = Path(raw_input).expanduser()
-    if possible_path.is_file():
-        return possible_path.read_text()
+    try:
+        if possible_path.is_file():
+            return possible_path.read_text()
+    except OSError:
+        return raw_input
     return raw_input
 
 
 def write_text_artifact(relative_path: str, content: str):
-    path = ARTIFACT_DIR / relative_path
+    path = artifact_path(relative_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content)
 
@@ -612,7 +667,9 @@ def write_compile_order(files: List[Dict[str, str]]):
     write_text_artifact("compile_order.f", compile_order + ("\n" if compile_order else ""))
 
 
-def basic_rtl_sanity(files: List[Dict[str, str]]) -> Dict[str, object]:
+def basic_rtl_sanity(
+    files: List[Dict[str, str]], allow_blackboxes: bool = False
+) -> Dict[str, object]:
     issues = []
     module_counts = extract_module_name_counts(files)
     defined_modules = set(module_counts)
@@ -635,7 +692,7 @@ def basic_rtl_sanity(files: List[Dict[str, str]]) -> Dict[str, object]:
             issues.append(f"{filename}: possible assign statement missing semicolon")
 
     for instance_module in extract_instantiated_modules(files):
-        if instance_module not in defined_modules:
+        if instance_module not in defined_modules and not allow_blackboxes:
             issues.append(f"unresolved module instantiation: {instance_module}")
 
     if issues:
@@ -697,7 +754,9 @@ def current_manager_task(state: AgentState):
     return state["manager_plan"][state["current_task_index"]]
 
 
-def run_syntax_lint(files: List[Dict[str, str]], require_tool: bool = False) -> Dict[str, object]:
+def run_syntax_lint(
+    files: List[Dict[str, str]], require_tool: bool = False, timeout_seconds: int = 30
+) -> Dict[str, object]:
     if not files:
         return {"passed": False, "report": "No files were available for lint."}
 
@@ -728,11 +787,11 @@ def run_syntax_lint(files: List[Dict[str, str]], require_tool: bool = False) -> 
             cmd = [lint_tool, "-tnull", "-g2012"] + [str(path) for path in file_paths]
 
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_seconds)
         except subprocess.TimeoutExpired:
             return {
                 "passed": False,
-                "report": f"{Path(lint_tool).name} timed out after 30 seconds.",
+                "report": f"{Path(lint_tool).name} timed out after {timeout_seconds} seconds.",
             }
         output = (result.stdout + "\n" + result.stderr).strip()
         if result.returncode == 0:
@@ -1005,6 +1064,7 @@ Architecture contract:
 
 def supervisor_agent(state: AgentState):
     task = current_manager_task(state)
+    task_id = sanitize_artifact_name(task.get("id"), "task")
     print(f"---SUPERVISOR: Detailing Task {task['id']} - {task['title']}---")
     review_feedback = ""
     if state.get("supervisor_review_report"):
@@ -1099,11 +1159,11 @@ Previous verification report, if any:
         }
     )
     write_text_artifact(
-        f"logs/{task['id']}_manager_handoff.md",
+        f"logs/{task_id}_manager_handoff.md",
         current_manager_handoff(state),
     )
     write_text_artifact(
-        f"logs/{task['id']}_supervisor_plan.md",
+        f"logs/{task_id}_supervisor_plan.md",
         response.content,
     )
     return {
@@ -1117,6 +1177,7 @@ Previous verification report, if any:
 
 def supervisor_review_agent(state: AgentState):
     task = current_manager_task(state)
+    task_id = sanitize_artifact_name(task.get("id"), "task")
     print(f"---SUPERVISOR REVIEW: Checking task packet for {task['id']}---")
     prompt = ChatPromptTemplate.from_messages(
         [
@@ -1181,7 +1242,7 @@ Supervisor task packet:
         report = "Supervisor review output was not valid JSON."
 
     write_text_artifact(
-        f"logs/{task['id']}_supervisor_review_attempt_{state.get('supervisor_retry_count', 0) + 1}.md",
+        f"logs/{task_id}_supervisor_review_attempt_{state.get('supervisor_retry_count', 0) + 1}.md",
         report or ("PASS" if passed else "FAIL"),
     )
 
@@ -1204,6 +1265,7 @@ Supervisor task packet:
 
 def control_datapath_planner_agent(state: AgentState):
     task = current_manager_task(state)
+    task_id = sanitize_artifact_name(task.get("id"), "task")
     print(f"---CONTROL/DATAPATH PLANNER: Structuring {task['id']}---")
     review_feedback = ""
     if state.get("control_datapath_review_report"):
@@ -1285,7 +1347,7 @@ Previous verification report, if any:
         }
     )
     write_text_artifact(
-        f"logs/{task['id']}_control_datapath_plan.md",
+        f"logs/{task_id}_control_datapath_plan.md",
         response.content,
     )
     return {
@@ -1297,6 +1359,7 @@ Previous verification report, if any:
 
 def control_datapath_review_agent(state: AgentState):
     task = current_manager_task(state)
+    task_id = sanitize_artifact_name(task.get("id"), "task")
     print(f"---CONTROL/DATAPATH REVIEW: Checking micro-architecture plan for {task['id']}---")
     prompt = ChatPromptTemplate.from_messages(
         [
@@ -1362,7 +1425,7 @@ Control/Data Path plan:
         report = "Control/Data Path review output was not valid JSON."
 
     write_text_artifact(
-        f"logs/{task['id']}_control_datapath_review_attempt_{state.get('control_datapath_retry_count', 0) + 1}.md",
+        f"logs/{task_id}_control_datapath_review_attempt_{state.get('control_datapath_retry_count', 0) + 1}.md",
         report or ("PASS" if passed else "FAIL"),
     )
 
@@ -1385,6 +1448,7 @@ Control/Data Path plan:
 
 def verilog_coding_team_agent(state: AgentState):
     task = current_manager_task(state)
+    task_id = sanitize_artifact_name(task.get("id"), "task")
     print(f"---VERILOG CODING TEAM: Implementing {task['id']}---")
     feedback = ""
     if state.get("verification_report") and state.get("verification_retry_count", 0) > 0:
@@ -1462,12 +1526,14 @@ Current RTL files:
 
     try:
         files = _load_json(response.content)
-        is_valid, validation_error = validate_generated_files(files)
+        is_valid, validation_error = validate_generated_files(
+            files, state.get("max_generated_file_bytes", 500_000)
+        )
         if not is_valid:
             raise ValueError(validation_error)
         print(f"---VERILOG CODING TEAM: Generated {len(files)} candidate files.---")
         write_json_artifact(
-            f"logs/{task['id']}_coding_attempt_{state.get('coding_retry_count', 0) + 1}.json",
+            f"logs/{task_id}_coding_attempt_{state.get('coding_retry_count', 0) + 1}.json",
             files,
         )
         return {
@@ -1482,7 +1548,7 @@ Current RTL files:
     except (json.JSONDecodeError, ValueError) as exc:
         print(f"---ERROR: Coding team produced invalid JSON: {exc}---")
         write_text_artifact(
-            f"failed_attempts/{task['id']}_invalid_json_attempt_{state.get('coding_retry_count', 0) + 1}.txt",
+            f"failed_attempts/{task_id}_invalid_json_attempt_{state.get('coding_retry_count', 0) + 1}.txt",
             response.content,
         )
         report = f"Coding output format failed: {exc}. Regenerate valid JSON only."
@@ -1501,11 +1567,12 @@ Current RTL files:
 
 def microarchitecture_reviewer_agent(state: AgentState):
     task = current_manager_task(state)
+    task_id = sanitize_artifact_name(task.get("id"), "task")
     print(f"---MICROARCH REVIEWER: Checking control/datapath implementation for {task['id']}---")
     merged_files = merge_files(state.get("final_files", []), state.get("candidate_files", []))
     static_result = static_microarchitecture_review(state.get("candidate_files", []))
     write_text_artifact(
-        f"logs/{task['id']}_microarchitecture_static_attempt_{state.get('microarchitecture_retry_count', 0) + 1}.txt",
+        f"logs/{task_id}_microarchitecture_static_attempt_{state.get('microarchitecture_retry_count', 0) + 1}.txt",
         static_result["report"],
     )
 
@@ -1584,7 +1651,7 @@ RTL candidate:
         report = f"Static microarchitecture scan failed:\n{static_result['report']}\n\n{report}"
 
     write_text_artifact(
-        f"logs/{task['id']}_microarchitecture_review_attempt_{state.get('microarchitecture_retry_count', 0) + 1}.md",
+        f"logs/{task_id}_microarchitecture_review_attempt_{state.get('microarchitecture_retry_count', 0) + 1}.md",
         report or ("PASS" if passed else "FAIL"),
     )
 
@@ -1600,7 +1667,7 @@ RTL candidate:
 
     print("---MICROARCH REVIEWER: FAIL---")
     write_text_artifact(
-        f"failed_attempts/{task['id']}_microarchitecture_failed_attempt_{state.get('microarchitecture_retry_count', 0) + 1}.txt",
+        f"failed_attempts/{task_id}_microarchitecture_failed_attempt_{state.get('microarchitecture_retry_count', 0) + 1}.txt",
         render_files(state.get("candidate_files", [])) + "\n\n" + report,
     )
     return {
@@ -1615,17 +1682,18 @@ RTL candidate:
 
 def verification_team_agent(state: AgentState):
     task = current_manager_task(state)
+    task_id = sanitize_artifact_name(task.get("id"), "task")
     print(f"---VERIFICATION TEAM: Checking {task['id']}---")
     merged_files = merge_files(state.get("final_files", []), state.get("candidate_files", []))
-    sanity_result = basic_rtl_sanity(merged_files)
+    sanity_result = basic_rtl_sanity(merged_files, state.get("allow_blackboxes", False))
     write_text_artifact(
-        f"logs/{task['id']}_basic_sanity_attempt_{state.get('verification_retry_count', 0) + 1}.txt",
+        f"logs/{task_id}_basic_sanity_attempt_{state.get('verification_retry_count', 0) + 1}.txt",
         sanity_result["report"],
     )
     if not sanity_result["passed"]:
         report = f"Basic RTL sanity failed before lint:\n{sanity_result['report']}"
         write_text_artifact(
-            f"failed_attempts/{task['id']}_sanity_failed_attempt_{state.get('verification_retry_count', 0) + 1}.txt",
+            f"failed_attempts/{task_id}_sanity_failed_attempt_{state.get('verification_retry_count', 0) + 1}.txt",
             render_files(state.get("candidate_files", [])) + "\n\n" + report,
         )
         print("---VERIFICATION TEAM: BASIC SANITY FAIL---")
@@ -1637,15 +1705,19 @@ def verification_team_agent(state: AgentState):
             "blocking_report": report,
         }
 
-    lint_result = run_syntax_lint(merged_files, state.get("require_lint", False))
+    lint_result = run_syntax_lint(
+        merged_files,
+        state.get("require_lint", False),
+        state.get("lint_timeout_seconds", 30),
+    )
     write_text_artifact(
-        f"logs/{task['id']}_lint_attempt_{state.get('verification_retry_count', 0) + 1}.txt",
+        f"logs/{task_id}_lint_attempt_{state.get('verification_retry_count', 0) + 1}.txt",
         lint_result["report"],
     )
     if not lint_result["passed"]:
         report = f"Syntax lint failed before functional review:\n{lint_result['report']}"
         write_text_artifact(
-            f"failed_attempts/{task['id']}_lint_failed_attempt_{state.get('verification_retry_count', 0) + 1}.txt",
+            f"failed_attempts/{task_id}_lint_failed_attempt_{state.get('verification_retry_count', 0) + 1}.txt",
             render_files(state.get("candidate_files", [])) + "\n\n" + report,
         )
         print("---VERIFICATION TEAM: LINT FAIL---")
@@ -1733,7 +1805,7 @@ RTL candidate to verify:
     if passed:
         print("---VERIFICATION TEAM: PASS---")
         write_text_artifact(
-            f"logs/{task['id']}_verification_report.md",
+            f"logs/{task_id}_verification_report.md",
             report or "PASS",
         )
         return {
@@ -1747,7 +1819,7 @@ RTL candidate to verify:
 
     print("---VERIFICATION TEAM: FAIL---")
     write_text_artifact(
-        f"failed_attempts/{task['id']}_functional_failed_attempt_{state.get('verification_retry_count', 0) + 1}.txt",
+        f"failed_attempts/{task_id}_functional_failed_attempt_{state.get('verification_retry_count', 0) + 1}.txt",
         render_files(state.get("candidate_files", [])) + "\n\n" + report,
     )
     return {
@@ -1763,11 +1835,12 @@ RTL candidate to verify:
 
 def supervisor_accept_agent(state: AgentState):
     task = current_manager_task(state)
+    task_id = sanitize_artifact_name(task.get("id"), "task")
     print(f"---SUPERVISOR: Accepting {task['id']} and Preparing Next Task---")
     final_files = merge_files(state.get("final_files", []), state.get("candidate_files", []))
     rtl_context = render_files(final_files)
     top_module_candidates = extract_module_names(final_files)
-    write_json_artifact(f"logs/{task['id']}_accepted_files.json", final_files)
+    write_json_artifact(f"logs/{task_id}_accepted_files.json", final_files)
     write_json_artifact("logs/top_module_candidates.json", top_module_candidates)
     return {
         "final_files": final_files,
@@ -1840,7 +1913,9 @@ Top module candidates, in observed order:
 
     try:
         files = _load_json(response.content)
-        is_valid, validation_error = validate_generated_files(files)
+        is_valid, validation_error = validate_generated_files(
+            files, state.get("max_generated_file_bytes", 500_000)
+        )
         if not is_valid:
             raise ValueError(validation_error)
         write_json_artifact("logs/testbench_files.json", files)
@@ -1872,7 +1947,11 @@ Top module candidates, in observed order:
 def final_lint_agent(state: AgentState):
     print("---FINAL LINT: Checking RTL and Testbench Together---")
     all_files = state.get("final_files", []) + state.get("testbench_files", [])
-    lint_result = run_syntax_lint(all_files, state.get("require_lint", False))
+    lint_result = run_syntax_lint(
+        all_files,
+        state.get("require_lint", False),
+        state.get("lint_timeout_seconds", 30),
+    )
     write_text_artifact("logs/final_lint_report.txt", lint_result["report"])
     if lint_result["passed"]:
         return {
@@ -1956,6 +2035,9 @@ def summary_agent(state: AgentState):
         "last_verification_report": state.get("verification_report", ""),
         "last_lint_report": state.get("lint_report", ""),
         "require_lint": state.get("require_lint", False),
+        "lint_timeout_seconds": state.get("lint_timeout_seconds", 30),
+        "allow_blackboxes": state.get("allow_blackboxes", False),
+        "max_generated_file_bytes": state.get("max_generated_file_bytes", 0),
         "final_lint_passed": state.get("final_lint_passed", False),
         "final_lint_report": state.get("final_lint_report", ""),
         "retry_counts": {
@@ -2212,6 +2294,28 @@ if __name__ == "__main__":
     if args.auto_approve:
         os.environ["AUTO_APPROVE_FINAL"] = "true"
 
+    execution_config = {
+        "argv": sys.argv[1:],
+        "artifact_dir": str(ARTIFACT_DIR),
+        "auto_approve": args.auto_approve,
+        "skip_testbench": args.no_testbench,
+        "require_lint": args.require_lint,
+        "lint_timeout_seconds": args.lint_timeout,
+        "allow_blackboxes": args.allow_blackboxes,
+        "max_generated_file_bytes": args.max_generated_file_bytes,
+        "retry_limits": {
+            "architecture": args.max_architecture_retries,
+            "supervisor": args.max_supervisor_retries,
+            "control_datapath": args.max_control_datapath_retries,
+            "coding": args.max_retries,
+            "microarchitecture": args.max_retries,
+            "verification": args.max_retries,
+            "testbench": args.max_testbench_retries,
+        },
+        "llm_config": active_llm_config,
+    }
+    write_json_artifact("execution_config.json", execution_config)
+
     print("Verilog Coding Agent (Manager / Supervisor / Coding / Verification)")
     print(
         f"LLM: provider={active_llm_config['provider']} "
@@ -2253,6 +2357,8 @@ if __name__ == "__main__":
         "verification_report": "",
         "lint_report": "",
         "require_lint": args.require_lint,
+        "lint_timeout_seconds": args.lint_timeout,
+        "allow_blackboxes": args.allow_blackboxes,
         "final_lint_passed": False,
         "final_lint_report": "",
         "human_approved": False,
@@ -2261,6 +2367,7 @@ if __name__ == "__main__":
         "run_status": "",
         "failed_stage": "",
         "blocking_report": "",
+        "max_generated_file_bytes": args.max_generated_file_bytes,
         "generation_ok": False,
         "error_message": "",
     }
