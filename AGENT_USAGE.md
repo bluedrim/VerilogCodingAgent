@@ -69,6 +69,7 @@ Options:
 - `--lint-timeout`: Syntax lint timeout in seconds.
 - `--allow-blackboxes`: Allow unresolved module instantiations in static sanity checks.
 - `--max-generated-file-bytes`: Maximum allowed bytes per generated RTL/testbench file.
+- `--max-context-chars`: Maximum RTL/context characters sent to each LLM prompt.
 - `--artifact-dir`: Directory for generated artifacts and logs.
 - `--llm-provider`: `ollama` or `gpt-oss`.
 - `--llm-model`: Model name such as `gpt-oss`, `gpt-oss:20b`, `gpt-oss:120b`, or another Ollama model.
@@ -104,5 +105,5 @@ tool is available, lint is skipped and the skip is recorded in the logs. Use
 
 `generated_rtl/run_summary.json` includes `run_status`, `failed_stage`,
 `blocking_report`, artifact directory, lint policy, blackbox policy, generated
-file size limit, retry limits, final lint status, and stage-specific retry
-counts.
+file size limit, prompt context limit, retry limits, final lint status, and
+stage-specific retry counts.

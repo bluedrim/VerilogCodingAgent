@@ -18,89 +18,99 @@ def positive_int(raw_value: str) -> int:
     return value
 
 
-if any(arg in {"-h", "--help"} for arg in sys.argv[1:]):
-    help_parser = argparse.ArgumentParser(description="Run the Verilog coding agent.")
-    help_parser.add_argument("--spec", help="RTL requirement text or path to a requirement file.")
-    help_parser.add_argument(
+def build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Run the Verilog coding agent.")
+    parser.add_argument("--spec", help="RTL requirement text or path to a requirement file.")
+    parser.add_argument(
         "--max-retries",
         type=positive_int,
         default=3,
         help="Maximum retries per coding, microarchitecture review, and verification stage.",
     )
-    help_parser.add_argument(
+    parser.add_argument(
         "--max-architecture-retries",
         type=positive_int,
         default=2,
         help="Maximum architecture review retries.",
     )
-    help_parser.add_argument(
+    parser.add_argument(
         "--max-supervisor-retries",
         type=positive_int,
         default=2,
         help="Maximum Supervisor review retries.",
     )
-    help_parser.add_argument(
+    parser.add_argument(
         "--max-control-datapath-retries",
         type=positive_int,
         default=2,
         help="Maximum Control/Data Path plan review retries.",
     )
-    help_parser.add_argument(
+    parser.add_argument(
         "--max-testbench-retries",
         type=positive_int,
         default=2,
         help="Maximum smoke testbench generation retries.",
     )
-    help_parser.add_argument(
+    parser.add_argument(
         "--artifact-dir",
         default=os.getenv("ARTIFACT_DIR", "generated_rtl"),
         help="Directory for generated artifacts and logs.",
     )
-    help_parser.add_argument(
+    parser.add_argument(
         "--auto-approve",
         action="store_true",
         help="Skip final interactive approval and write generated files.",
     )
-    help_parser.add_argument(
+    parser.add_argument(
         "--no-testbench",
         action="store_true",
         help="Skip smoke testbench generation.",
     )
-    help_parser.add_argument(
+    parser.add_argument(
         "--require-lint",
         action="store_true",
         help="Fail when neither verilator nor iverilog is installed.",
     )
-    help_parser.add_argument(
+    parser.add_argument(
         "--lint-timeout",
         type=positive_int,
         default=30,
         help="Syntax lint timeout in seconds.",
     )
-    help_parser.add_argument(
+    parser.add_argument(
         "--allow-blackboxes",
         action="store_true",
         help="Allow unresolved module instantiations in static sanity checks.",
     )
-    help_parser.add_argument(
+    parser.add_argument(
         "--max-generated-file-bytes",
         type=positive_int,
         default=500_000,
         help="Maximum allowed bytes per generated RTL/testbench file.",
     )
-    help_parser.add_argument(
+    parser.add_argument(
+        "--max-context-chars",
+        type=positive_int,
+        default=120_000,
+        help="Maximum characters of RTL/context text sent to each LLM prompt.",
+    )
+    parser.add_argument(
         "--llm-provider",
         choices=["ollama", "gpt-oss"],
         help="LLM provider/backend. 'gpt-oss' supports Ollama or OpenAI-compatible endpoints.",
     )
-    help_parser.add_argument("--llm-model", help="LLM model name, for example gpt-oss:20b.")
-    help_parser.add_argument("--llm-temperature", type=float, help="LLM temperature.")
-    help_parser.add_argument(
+    parser.add_argument("--llm-model", help="LLM model name, for example gpt-oss:20b.")
+    parser.add_argument("--llm-temperature", type=float, help="LLM temperature.")
+    parser.add_argument(
         "--llm-api-url",
         help="OpenAI-compatible chat completions URL, for example http://abc.net:30001/chat/completions.",
     )
-    help_parser.add_argument("--llm-api-key", help="API key for an OpenAI-compatible gpt-oss endpoint.")
-    help_parser.parse_args()
+    parser.add_argument("--llm-api-key", help="API key for an OpenAI-compatible gpt-oss endpoint.")
+    return parser
+
+
+if any(arg in {"-h", "--help"} for arg in sys.argv[1:]):
+    build_arg_parser().parse_args()
     sys.exit(0)
 
 try:
@@ -170,6 +180,7 @@ class AgentState(TypedDict):
     failed_stage: str
     blocking_report: str
     max_generated_file_bytes: int
+    max_context_chars: int
     generation_ok: bool
     error_message: str
 
@@ -356,6 +367,14 @@ def _load_json(raw_content: str):
     return json.loads(_extract_json_candidate(raw_content))
 
 
+def parse_review_result(raw_content: str, invalid_json_report: str):
+    try:
+        result = _load_json(raw_content)
+        return _json_bool(result.get("pass")), str(result.get("report", "")).strip()
+    except (json.JSONDecodeError, AttributeError):
+        return False, invalid_json_report
+
+
 def _json_bool(value: object) -> bool:
     if isinstance(value, bool):
         return value
@@ -378,6 +397,19 @@ def validate_plan(plan: object):
         if task_id in seen_ids:
             return False, f"Task id '{task_id}' is duplicated."
         seen_ids.add(task_id)
+    for idx, task in enumerate(plan):
+        dependencies = task.get("dependencies")
+        if dependencies in (None, "", "TBD"):
+            continue
+        if isinstance(dependencies, str):
+            continue
+        if isinstance(dependencies, list):
+            dependency_ids = [str(item).strip() for item in dependencies]
+        else:
+            return False, f"Task {idx} dependencies must be a string or list."
+        unknown = [dep for dep in dependency_ids if dep and dep not in seen_ids and dep != task["id"]]
+        if unknown:
+            return False, f"Task {idx} references unknown dependencies: {', '.join(unknown)}"
     return True, ""
 
 
@@ -471,88 +503,7 @@ def validate_generated_files(files: object, max_file_bytes: int = 500_000):
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Run the Verilog coding agent.")
-    parser.add_argument("--spec", help="RTL requirement text or path to a requirement file.")
-    parser.add_argument(
-        "--max-retries",
-        type=positive_int,
-        default=3,
-        help="Maximum retries per coding, microarchitecture review, and verification stage.",
-    )
-    parser.add_argument(
-        "--max-architecture-retries",
-        type=positive_int,
-        default=2,
-        help="Maximum architecture review retries.",
-    )
-    parser.add_argument(
-        "--max-supervisor-retries",
-        type=positive_int,
-        default=2,
-        help="Maximum Supervisor review retries.",
-    )
-    parser.add_argument(
-        "--max-control-datapath-retries",
-        type=positive_int,
-        default=2,
-        help="Maximum Control/Data Path plan review retries.",
-    )
-    parser.add_argument(
-        "--max-testbench-retries",
-        type=positive_int,
-        default=2,
-        help="Maximum smoke testbench generation retries.",
-    )
-    parser.add_argument(
-        "--artifact-dir",
-        default=str(ARTIFACT_DIR),
-        help="Directory for generated artifacts and logs.",
-    )
-    parser.add_argument(
-        "--auto-approve",
-        action="store_true",
-        help="Skip final interactive approval and write generated files.",
-    )
-    parser.add_argument(
-        "--no-testbench",
-        action="store_true",
-        help="Skip smoke testbench generation.",
-    )
-    parser.add_argument(
-        "--require-lint",
-        action="store_true",
-        help="Fail when neither verilator nor iverilog is installed.",
-    )
-    parser.add_argument(
-        "--lint-timeout",
-        type=positive_int,
-        default=30,
-        help="Syntax lint timeout in seconds.",
-    )
-    parser.add_argument(
-        "--allow-blackboxes",
-        action="store_true",
-        help="Allow unresolved module instantiations in static sanity checks.",
-    )
-    parser.add_argument(
-        "--max-generated-file-bytes",
-        type=positive_int,
-        default=500_000,
-        help="Maximum allowed bytes per generated RTL/testbench file.",
-    )
-    parser.add_argument(
-        "--llm-provider",
-        choices=["ollama", "gpt-oss"],
-        help="LLM provider/backend. 'gpt-oss' supports Ollama or OpenAI-compatible endpoints.",
-    )
-    parser.add_argument("--llm-model", help="LLM model name, for example gpt-oss:20b.")
-    parser.add_argument("--llm-temperature", type=float, help="LLM temperature.")
-    parser.add_argument(
-        "--llm-api-url",
-        help="OpenAI-compatible chat completions URL, for example http://abc.net:30001/chat/completions.",
-    )
-    parser.add_argument("--llm-api-key", help="API key for an OpenAI-compatible gpt-oss endpoint.")
-    return parser.parse_args()
+    return build_arg_parser().parse_args()
 
 
 def read_user_requirement(raw_input: str) -> str:
@@ -587,6 +538,18 @@ def extract_module_names(files: List[Dict[str, str]]) -> List[str]:
             if name not in names:
                 names.append(name)
     return names
+
+
+def infer_top_module_candidates(files: List[Dict[str, str]]) -> List[str]:
+    modules = extract_module_names(files)
+    instantiated = set(extract_instantiated_modules(files))
+    non_testbench = [
+        name
+        for name in modules
+        if not re.search(r"(^tb_|_tb$|testbench)", name, flags=re.I)
+    ]
+    top_like = [name for name in non_testbench if name not in instantiated]
+    return top_like or non_testbench or modules
 
 
 def extract_module_name_counts(files: List[Dict[str, str]]) -> Dict[str, int]:
@@ -748,6 +711,17 @@ def render_files(files: List[Dict[str, str]]) -> str:
     for file_info in files:
         rendered.append(f"--- FILE: {file_info['filename']} ---\n{file_info['content']}")
     return "\n\n".join(rendered)
+
+
+def clip_text(text: str, max_chars: int) -> str:
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text
+    omitted = len(text) - max_chars
+    return text[:max_chars] + f"\n\n[TRUNCATED: omitted {omitted} characters]"
+
+
+def render_files_for_prompt(files: List[Dict[str, str]], max_chars: int) -> str:
+    return clip_text(render_files(files), max_chars)
 
 
 def current_manager_task(state: AgentState):
@@ -1032,13 +1006,9 @@ Architecture contract:
         }
     )
 
-    try:
-        result = _load_json(response.content)
-        passed = _json_bool(result.get("pass"))
-        report = str(result.get("report", "")).strip()
-    except (json.JSONDecodeError, AttributeError):
-        passed = False
-        report = "Architecture review output was not valid JSON."
+    passed, report = parse_review_result(
+        response.content, "Architecture review output was not valid JSON."
+    )
 
     write_text_artifact(
         f"logs/architecture_review_attempt_{state.get('architecture_retry_count', 0) + 1}.md",
@@ -1153,7 +1123,10 @@ Previous verification report, if any:
             "manager_handoff": current_manager_handoff(state),
             "architecture_contract": state.get("architecture_contract") or "(none)",
             "task": render_manager_task(task),
-            "rtl_context": state.get("rtl_context") or "(none)",
+            "rtl_context": clip_text(
+                state.get("rtl_context") or "(none)",
+                state.get("max_context_chars", 120_000),
+            ),
             "verification_report": state.get("verification_report") or "(none)",
             "review_feedback": review_feedback,
         }
@@ -1233,13 +1206,9 @@ Supervisor task packet:
         }
     )
 
-    try:
-        result = _load_json(response.content)
-        passed = _json_bool(result.get("pass"))
-        report = str(result.get("report", "")).strip()
-    except (json.JSONDecodeError, AttributeError):
-        passed = False
-        report = "Supervisor review output was not valid JSON."
+    passed, report = parse_review_result(
+        response.content, "Supervisor review output was not valid JSON."
+    )
 
     write_text_artifact(
         f"logs/{task_id}_supervisor_review_attempt_{state.get('supervisor_retry_count', 0) + 1}.md",
@@ -1341,7 +1310,10 @@ Previous verification report, if any:
             "task": render_manager_task(task),
             "manager_handoff": current_manager_handoff(state),
             "supervisor_plan": state["supervisor_plan"],
-            "rtl_context": state.get("rtl_context") or "(none)",
+            "rtl_context": clip_text(
+                state.get("rtl_context") or "(none)",
+                state.get("max_context_chars", 120_000),
+            ),
             "verification_report": state.get("verification_report") or "(none)",
             "review_feedback": review_feedback,
         }
@@ -1416,13 +1388,9 @@ Control/Data Path plan:
         }
     )
 
-    try:
-        result = _load_json(response.content)
-        passed = _json_bool(result.get("pass"))
-        report = str(result.get("report", "")).strip()
-    except (json.JSONDecodeError, AttributeError):
-        passed = False
-        report = "Control/Data Path review output was not valid JSON."
+    passed, report = parse_review_result(
+        response.content, "Control/Data Path review output was not valid JSON."
+    )
 
     write_text_artifact(
         f"logs/{task_id}_control_datapath_review_attempt_{state.get('control_datapath_retry_count', 0) + 1}.md",
@@ -1519,7 +1487,10 @@ Current RTL files:
             "manager_handoff": current_manager_handoff(state),
             "supervisor_plan": state["supervisor_plan"],
             "control_datapath_plan": state.get("control_datapath_plan") or "(none)",
-            "rtl_context": state.get("rtl_context") or "(none)",
+            "rtl_context": clip_text(
+                state.get("rtl_context") or "(none)",
+                state.get("max_context_chars", 120_000),
+            ),
             "feedback": feedback,
         }
     )
@@ -1635,17 +1606,16 @@ RTL candidate:
             "supervisor_plan": state["supervisor_plan"],
             "control_datapath_plan": state.get("control_datapath_plan") or "(none)",
             "static_report": static_result["report"],
-            "candidate_rtl": render_files(merged_files),
+            "candidate_rtl": render_files_for_prompt(
+                merged_files, state.get("max_context_chars", 120_000)
+            ),
         }
     )
 
-    try:
-        result = _load_json(response.content)
-        passed = _json_bool(result.get("pass")) and static_result["passed"]
-        report = str(result.get("report", "")).strip()
-    except (json.JSONDecodeError, AttributeError):
-        passed = False
-        report = "Microarchitecture review output was not valid JSON."
+    passed, report = parse_review_result(
+        response.content, "Microarchitecture review output was not valid JSON."
+    )
+    passed = passed and static_result["passed"]
 
     if not static_result["passed"]:
         report = f"Static microarchitecture scan failed:\n{static_result['report']}\n\n{report}"
@@ -1790,17 +1760,16 @@ RTL candidate to verify:
             "manager_handoff": current_manager_handoff(state),
             "supervisor_plan": state["supervisor_plan"],
             "control_datapath_plan": state.get("control_datapath_plan") or "(none)",
-            "candidate_rtl": render_files(merged_files),
+            "candidate_rtl": render_files_for_prompt(
+                merged_files, state.get("max_context_chars", 120_000)
+            ),
         }
     )
 
-    try:
-        result = _load_json(response.content)
-        passed = _json_bool(result.get("pass"))
-        report = str(result.get("report", "")).strip()
-    except (json.JSONDecodeError, AttributeError):
-        passed = False
-        report = "Verification output was not valid JSON. Re-run coding with clearer, self-checkable RTL."
+    passed, report = parse_review_result(
+        response.content,
+        "Verification output was not valid JSON. Re-run coding with clearer, self-checkable RTL.",
+    )
 
     if passed:
         print("---VERIFICATION TEAM: PASS---")
@@ -1839,7 +1808,7 @@ def supervisor_accept_agent(state: AgentState):
     print(f"---SUPERVISOR: Accepting {task['id']} and Preparing Next Task---")
     final_files = merge_files(state.get("final_files", []), state.get("candidate_files", []))
     rtl_context = render_files(final_files)
-    top_module_candidates = extract_module_names(final_files)
+    top_module_candidates = infer_top_module_candidates(final_files)
     write_json_artifact(f"logs/{task_id}_accepted_files.json", final_files)
     write_json_artifact("logs/top_module_candidates.json", top_module_candidates)
     return {
@@ -1906,7 +1875,9 @@ Top module candidates, in observed order:
     response = (prompt | llm).invoke(
         {
             "user_request": state["user_request"],
-            "rtl_context": render_files(state.get("final_files", [])),
+            "rtl_context": render_files_for_prompt(
+                state.get("final_files", []), state.get("max_context_chars", 120_000)
+            ),
             "top_module_candidates": ", ".join(state.get("top_module_candidates", [])) or "(unknown)",
         }
     )
@@ -1976,7 +1947,7 @@ def final_review_agent(state: AgentState):
     print("\n" + "-" * 20 + " FINAL REVIEW " + "-" * 20)
     print(f"Top module candidates: {', '.join(state.get('top_module_candidates', [])) or '(unknown)'}")
     print(f"Final lint: {state.get('final_lint_report') or '(not run)'}")
-    print(render_files(all_files))
+    print(render_files_for_prompt(all_files, state.get("max_context_chars", 120_000)))
     print("\n" + "-" * 54)
     feedback = input("Write files? (approve / reject): ").strip().lower()
     if feedback == "approve":
@@ -2038,6 +2009,7 @@ def summary_agent(state: AgentState):
         "lint_timeout_seconds": state.get("lint_timeout_seconds", 30),
         "allow_blackboxes": state.get("allow_blackboxes", False),
         "max_generated_file_bytes": state.get("max_generated_file_bytes", 0),
+        "max_context_chars": state.get("max_context_chars", 0),
         "final_lint_passed": state.get("final_lint_passed", False),
         "final_lint_report": state.get("final_lint_report", ""),
         "retry_counts": {
@@ -2303,6 +2275,7 @@ if __name__ == "__main__":
         "lint_timeout_seconds": args.lint_timeout,
         "allow_blackboxes": args.allow_blackboxes,
         "max_generated_file_bytes": args.max_generated_file_bytes,
+        "max_context_chars": args.max_context_chars,
         "retry_limits": {
             "architecture": args.max_architecture_retries,
             "supervisor": args.max_supervisor_retries,
@@ -2368,6 +2341,7 @@ if __name__ == "__main__":
         "failed_stage": "",
         "blocking_report": "",
         "max_generated_file_bytes": args.max_generated_file_bytes,
+        "max_context_chars": args.max_context_chars,
         "generation_ok": False,
         "error_message": "",
     }
