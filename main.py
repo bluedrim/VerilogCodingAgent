@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Dict, List, TypedDict
 
@@ -15,6 +16,13 @@ def positive_int(raw_value: str) -> int:
     value = int(raw_value)
     if value < 0:
         raise argparse.ArgumentTypeError("value must be 0 or greater")
+    return value
+
+
+def bounded_temperature(raw_value: str) -> float:
+    value = float(raw_value)
+    if value < 0 or value > 2:
+        raise argparse.ArgumentTypeError("temperature must be between 0 and 2")
     return value
 
 
@@ -89,6 +97,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Maximum allowed bytes per generated RTL/testbench file.",
     )
     parser.add_argument(
+        "--max-generated-files",
+        type=positive_int,
+        default=64,
+        help="Maximum number of files accepted from RTL/testbench generation.",
+    )
+    parser.add_argument(
         "--max-context-chars",
         type=positive_int,
         default=120_000,
@@ -112,12 +126,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="LLM provider/backend. 'openai' uses the current account API key from OPENAI_API_KEY or --llm-api-key.",
     )
     parser.add_argument("--llm-model", help="LLM model name, for example gpt-oss:20b or gpt-4.1.")
-    parser.add_argument("--llm-temperature", type=float, help="LLM temperature.")
+    parser.add_argument("--llm-temperature", type=bounded_temperature, help="LLM temperature.")
     parser.add_argument(
         "--llm-api-url",
         help="OpenAI-compatible chat completions URL, for example http://abc.net:30001/chat/completions.",
     )
     parser.add_argument("--llm-api-key", help="API key for OpenAI or an OpenAI-compatible endpoint.")
+    parser.add_argument(
+        "--fail-on-manager-fallback",
+        action="store_true",
+        help="Fail instead of using the single-task fallback when Manager planning output is invalid.",
+    )
     return parser
 
 
@@ -192,10 +211,13 @@ class AgentState(TypedDict):
     failed_stage: str
     blocking_report: str
     max_generated_file_bytes: int
+    max_generated_files: int
     max_context_chars: int
     max_user_request_chars: int
     max_manager_tasks: int
     manager_fallback_used: bool
+    fail_on_manager_fallback: bool
+    run_id: str
     generation_ok: bool
     error_message: str
 
@@ -219,6 +241,8 @@ def resolve_llm_settings(
     api_key: str | None = None,
 ) -> Dict[str, object]:
     resolved_provider = (provider or os.getenv("LLM_PROVIDER") or "ollama").strip().lower()
+    if resolved_provider not in {"ollama", "gpt-oss", "openai"}:
+        raise ValueError("Unsupported LLM provider. Use ollama, gpt-oss, or openai.")
     resolved_temperature = (
         temperature if temperature is not None else float(os.getenv("LLM_TEMPERATURE", "0.1"))
     )
@@ -278,6 +302,11 @@ def public_llm_config(settings: Dict[str, object]) -> Dict[str, object]:
     }
 
 
+def discover_lint_tool() -> str:
+    lint_tool = shutil.which("verilator") or shutil.which("iverilog")
+    return lint_tool or ""
+
+
 def create_llm(
     provider: str | None = None,
     model: str | None = None,
@@ -297,6 +326,8 @@ def create_llm(
             print(f"Missing dependency: {exc.name}")
             print("Install project dependencies with: python3 -m pip install -r requirements.txt")
             sys.exit(1)
+        if backend == "openai" and not settings["api_key"]:
+            raise ValueError("OpenAI provider requires OPENAI_API_KEY or --llm-api-key.")
         kwargs = {
             "model": model_name,
             "temperature": resolved_temperature,
@@ -325,7 +356,7 @@ def llm_config(
     return public_llm_config(resolve_llm_settings(provider, model, temperature, api_url, api_key))
 
 
-llm = create_llm()
+llm = None
 active_llm_config = llm_config()
 writer_tools = [write_verilog_file]
 ARTIFACT_DIR = Path(os.getenv("ARTIFACT_DIR", "generated_rtl"))
@@ -499,9 +530,13 @@ def current_manager_handoff(state: "AgentState") -> str:
     )
 
 
-def validate_generated_files(files: object, max_file_bytes: int = 500_000):
+def validate_generated_files(
+    files: object, max_file_bytes: int = 500_000, max_files: int = 64
+):
     if not isinstance(files, list) or not files:
         return False, "Coding output must be a non-empty JSON list."
+    if max_files and len(files) > max_files:
+        return False, f"Generated file count {len(files)} exceeds limit {max_files}."
     seen_filenames = set()
     for idx, file_info in enumerate(files):
         if not isinstance(file_info, dict):
@@ -514,8 +549,12 @@ def validate_generated_files(files: object, max_file_bytes: int = 500_000):
         if filename in seen_filenames:
             return False, f"Item {idx} duplicates filename '{filename}'."
         seen_filenames.add(filename)
+        if filename.startswith("."):
+            return False, f"Item {idx} filename must not be hidden."
         if Path(filename).name != filename:
             return False, f"Item {idx} filename must not include path segments."
+        if re.search(r"[^a-zA-Z0-9_.-]", filename):
+            return False, f"Item {idx} filename contains unsupported characters."
         if Path(filename).suffix.lower() not in {".v", ".sv", ".vh", ".svh"}:
             return False, f"Item {idx} has unsupported extension."
         if not isinstance(file_info["content"], str) or not file_info["content"].strip():
@@ -544,6 +583,10 @@ def normalize_generated_files(files: List[Dict[str, str]]) -> List[Dict[str, str
     return normalized
 
 
+def total_file_bytes(files: List[Dict[str, str]]) -> int:
+    return sum(len(file_info["content"].encode()) for file_info in files)
+
+
 def parse_args():
     return build_arg_parser().parse_args()
 
@@ -555,7 +598,7 @@ def read_user_requirement(raw_input: str) -> str:
     possible_path = Path(raw_input).expanduser()
     try:
         if possible_path.is_file():
-            return possible_path.read_text()
+            return possible_path.read_text(encoding="utf-8")
     except OSError:
         return raw_input
     return raw_input
@@ -564,7 +607,7 @@ def read_user_requirement(raw_input: str) -> str:
 def write_text_artifact(relative_path: str, content: str):
     path = artifact_path(relative_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content)
+    path.write_text(content, encoding="utf-8")
 
 
 def write_json_artifact(relative_path: str, content: object):
@@ -789,7 +832,7 @@ def run_syntax_lint(
     if not files:
         return {"passed": False, "report": "No files were available for lint."}
 
-    lint_tool = shutil.which("verilator") or shutil.which("iverilog")
+    lint_tool = discover_lint_tool()
     if not lint_tool:
         if require_tool:
             return {
@@ -904,6 +947,18 @@ Rules:
         }
     except (json.JSONDecodeError, ValueError) as exc:
         print(f"---ERROR: Manager produced invalid plan: {exc}---")
+        if state.get("fail_on_manager_fallback"):
+            report = f"Manager planning failed and fallback is disabled: {exc}"
+            write_text_artifact("failed_attempts/manager_plan_failed.txt", response.content)
+            return {
+                "manager_plan": [],
+                "run_status": "failed",
+                "failed_stage": "manager",
+                "blocking_report": report,
+                "messages": [response],
+                "manager_fallback_used": False,
+                "error_message": report,
+            }
         fallback_plan = [
             {
                 "id": "T1",
@@ -1564,7 +1619,9 @@ Current RTL files:
         files = _load_json(response.content)
         files = normalize_generated_files(files)
         is_valid, validation_error = validate_generated_files(
-            files, state.get("max_generated_file_bytes", 500_000)
+            files,
+            state.get("max_generated_file_bytes", 500_000),
+            state.get("max_generated_files", 64),
         )
         if not is_valid:
             raise ValueError(validation_error)
@@ -1952,7 +2009,9 @@ Top module candidates, in observed order:
         files = _load_json(response.content)
         files = normalize_generated_files(files)
         is_valid, validation_error = validate_generated_files(
-            files, state.get("max_generated_file_bytes", 500_000)
+            files,
+            state.get("max_generated_file_bytes", 500_000),
+            state.get("max_generated_files", 64),
         )
         if not is_valid:
             raise ValueError(validation_error)
@@ -2049,6 +2108,7 @@ def summary_agent(state: AgentState):
         or ""
     )
     summary = {
+        "run_id": state.get("run_id", ""),
         "run_status": run_status,
         "failed_stage": failed_stage,
         "blocking_report": blocking_report,
@@ -2059,6 +2119,7 @@ def summary_agent(state: AgentState):
         "manager_plan_saved": str(ARTIFACT_DIR / "manager_plan.json"),
         "manager_task_count": len(state.get("manager_plan", [])),
         "manager_fallback_used": state.get("manager_fallback_used", False),
+        "fail_on_manager_fallback": state.get("fail_on_manager_fallback", False),
         "accepted_task_count": state.get("current_task_index", 0),
         "pending_task_count": max(
             len(state.get("manager_plan", [])) - state.get("current_task_index", 0),
@@ -2079,10 +2140,12 @@ def summary_agent(state: AgentState):
         "human_approved": state.get("human_approved", False),
         "last_verification_report": state.get("verification_report", ""),
         "last_lint_report": state.get("lint_report", ""),
+        "lint_tool": discover_lint_tool(),
         "require_lint": state.get("require_lint", False),
         "lint_timeout_seconds": state.get("lint_timeout_seconds", 30),
         "allow_blackboxes": state.get("allow_blackboxes", False),
         "max_generated_file_bytes": state.get("max_generated_file_bytes", 0),
+        "max_generated_files": state.get("max_generated_files", 0),
         "max_context_chars": state.get("max_context_chars", 0),
         "max_user_request_chars": state.get("max_user_request_chars", 0),
         "max_manager_tasks": state.get("max_manager_tasks", 0),
@@ -2252,7 +2315,11 @@ workflow.add_node("writer_tool", writer_tool_node)
 workflow.set_entry_point("intake")
 
 workflow.add_edge("intake", "manager")
-workflow.add_edge("manager", "architecture")
+workflow.add_conditional_edges(
+    "manager",
+    lambda state: "fail" if state.get("failed_stage") == "manager" else "architecture",
+    {"architecture": "architecture", "fail": "summary"},
+)
 workflow.add_edge("architecture", "architecture_review")
 workflow.add_conditional_edges(
     "architecture_review",
@@ -2325,6 +2392,7 @@ app = workflow.compile()
 if __name__ == "__main__":
     args = parse_args()
     ARTIFACT_DIR = Path(args.artifact_dir)
+    run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     llm = create_llm(
         args.llm_provider,
         args.llm_model,
@@ -2343,17 +2411,21 @@ if __name__ == "__main__":
         os.environ["AUTO_APPROVE_FINAL"] = "true"
 
     execution_config = {
+        "run_id": run_id,
         "argv": sys.argv[1:],
         "artifact_dir": str(ARTIFACT_DIR),
         "auto_approve": args.auto_approve,
         "skip_testbench": args.no_testbench,
         "require_lint": args.require_lint,
+        "lint_tool": discover_lint_tool(),
         "lint_timeout_seconds": args.lint_timeout,
         "allow_blackboxes": args.allow_blackboxes,
         "max_generated_file_bytes": args.max_generated_file_bytes,
+        "max_generated_files": args.max_generated_files,
         "max_context_chars": args.max_context_chars,
         "max_user_request_chars": args.max_user_request_chars,
         "max_manager_tasks": args.max_manager_tasks,
+        "fail_on_manager_fallback": args.fail_on_manager_fallback,
         "retry_limits": {
             "architecture": args.max_architecture_retries,
             "supervisor": args.max_supervisor_retries,
@@ -2374,6 +2446,7 @@ if __name__ == "__main__":
     )
     initial_state = {
         "messages": [],
+        "run_id": run_id,
         "user_request": args.spec or "",
         "manager_plan": [],
         "architecture_contract": "",
@@ -2419,10 +2492,12 @@ if __name__ == "__main__":
         "failed_stage": "",
         "blocking_report": "",
         "max_generated_file_bytes": args.max_generated_file_bytes,
+        "max_generated_files": args.max_generated_files,
         "max_context_chars": args.max_context_chars,
         "max_user_request_chars": args.max_user_request_chars,
         "max_manager_tasks": args.max_manager_tasks,
         "manager_fallback_used": False,
+        "fail_on_manager_fallback": args.fail_on_manager_fallback,
         "generation_ok": False,
         "error_message": "",
     }
