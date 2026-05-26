@@ -17,11 +17,15 @@ def control_datapath_planner_agent(state: AgentState):
     task = current_manager_task(state)
     task_id = sanitize_artifact_name(task.get("id"), "task")
     print(f"---CONTROL/DATAPATH PLANNER: Structuring {task['id']}---")
-    review_feedback = ""
-    if state.get("control_datapath_review_report"):
+    review_feedback = render_review_feedback(
+        state,
+        ("supervisor_review", "control_datapath_review", "microarchitecture_review", "verification"),
+        state.get("max_context_chars", 120_000),
+    )
+    if review_feedback != "(none)":
         review_feedback = (
-            "\nPrevious Control/Data Path review feedback to fix:\n"
-            f"{state['control_datapath_review_report']}"
+            "Reviewer feedback that must be reflected in this Control/Data Path plan:\n"
+            f"{review_feedback}"
         )
     prompt = ChatPromptTemplate.from_messages(
         [
@@ -196,5 +200,11 @@ Control/Data Path plan:
         "control_datapath_review_passed": False,
         "control_datapath_review_report": report or "Control/Data Path plan is incomplete.",
         "control_datapath_retry_count": state.get("control_datapath_retry_count", 0) + 1,
+        "review_feedback_log": append_review_feedback(
+            state,
+            "control_datapath_review",
+            report or "Control/Data Path plan is incomplete.",
+            task_id,
+        ),
         "messages": [response],
     }

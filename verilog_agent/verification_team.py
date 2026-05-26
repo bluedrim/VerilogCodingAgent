@@ -36,6 +36,7 @@ def verification_team_agent(state: AgentState):
             "verification_retry_count": state.get("verification_retry_count", 0) + 1,
             "failed_stage": "verification",
             "blocking_report": report,
+            "review_feedback_log": append_review_feedback(state, "verification", report, task_id),
         }
 
     lint_result = run_syntax_lint(
@@ -61,6 +62,9 @@ def verification_team_agent(state: AgentState):
             "verification_retry_count": state.get("verification_retry_count", 0) + 1,
             "failed_stage": "verification_lint",
             "blocking_report": report,
+            "review_feedback_log": append_review_feedback(
+                state, "verification_lint", report, task_id
+            ),
         }
 
     prompt = ChatPromptTemplate.from_messages(
@@ -165,5 +169,11 @@ RTL candidate to verify:
         "verification_retry_count": state.get("verification_retry_count", 0) + 1,
         "failed_stage": "verification",
         "blocking_report": report or "Verification failed without a detailed report.",
+        "review_feedback_log": append_review_feedback(
+            state,
+            "verification",
+            report or "Verification failed without a detailed report.",
+            task_id,
+        ),
         "messages": [response],
     }

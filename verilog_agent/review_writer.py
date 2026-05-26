@@ -61,6 +61,7 @@ def summary_agent(state: AgentState):
         "run_status": run_status,
         "failed_stage": failed_stage,
         "blocking_report": blocking_report,
+        "review_feedback_log": state.get("review_feedback_log", []),
         "artifact_dir": str(ARTIFACT_DIR),
         "llm_config": active_llm_config,
         "llm_config_saved": str(ARTIFACT_DIR / "llm_config.json"),

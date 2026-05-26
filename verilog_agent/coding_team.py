@@ -18,13 +18,22 @@ def verilog_coding_team_agent(state: AgentState):
     task_id = sanitize_artifact_name(task.get("id"), "task")
     task_label = str(task.get("id") or task_id)
     print(f"---VERILOG CODING TEAM: Implementing {task_label}---")
-    feedback = ""
-    if state.get("verification_report") and state.get("verification_retry_count", 0) > 0:
-        feedback = f"\nFix the previous verification failures:\n{state['verification_report']}"
-    if state.get("microarchitecture_report") and state.get("microarchitecture_retry_count", 0) > 0:
-        feedback += f"\nFix the previous microarchitecture review failures:\n{state['microarchitecture_report']}"
-    if state.get("error_message") and state.get("coding_retry_count", 0) > 0:
-        feedback += f"\nFix the previous coding output format failure:\n{state['error_message']}"
+    feedback = render_review_feedback(
+        state,
+        (
+            "control_datapath_review",
+            "microarchitecture_review",
+            "verification",
+            "verification_lint",
+            "coding_format",
+        ),
+        state.get("max_context_chars", 120_000),
+    )
+    if feedback != "(none)":
+        feedback = (
+            "\nReviewer and format feedback that must be fixed in this RTL revision:\n"
+            f"{feedback}"
+        )
 
     prompt = ChatPromptTemplate.from_messages(
         [
@@ -140,6 +149,7 @@ Current RTL files:
             "blocking_report": report,
             "messages": [response],
             "error_message": str(exc),
+            "review_feedback_log": append_review_feedback(state, "coding_format", report, task_id),
         }
 
 
@@ -258,5 +268,11 @@ RTL candidate:
         "microarchitecture_retry_count": state.get("microarchitecture_retry_count", 0) + 1,
         "failed_stage": "microarchitecture_review",
         "blocking_report": report or "Microarchitecture review failed.",
+        "review_feedback_log": append_review_feedback(
+            state,
+            "microarchitecture_review",
+            report or "Microarchitecture review failed.",
+            task_id,
+        ),
         "messages": [response],
     }

@@ -17,11 +17,15 @@ def supervisor_agent(state: AgentState):
     task = current_manager_task(state)
     task_id = sanitize_artifact_name(task.get("id"), "task")
     print(f"---SUPERVISOR: Detailing Task {task['id']} - {task['title']}---")
-    review_feedback = ""
-    if state.get("supervisor_review_report"):
+    review_feedback = render_review_feedback(
+        state,
+        ("architecture_review", "supervisor_review", "verification"),
+        state.get("max_context_chars", 120_000),
+    )
+    if review_feedback != "(none)":
         review_feedback = (
-            "\nPrevious supervisor review feedback to fix:\n"
-            f"{state['supervisor_review_report']}"
+            "Reviewer feedback that must be applied in this Supervisor task packet:\n"
+            f"{review_feedback}"
         )
     prompt = ChatPromptTemplate.from_messages(
         [
@@ -214,6 +218,12 @@ Supervisor task packet:
         "supervisor_review_passed": False,
         "supervisor_review_report": report or "Supervisor task packet is incomplete.",
         "supervisor_retry_count": state.get("supervisor_retry_count", 0) + 1,
+        "review_feedback_log": append_review_feedback(
+            state,
+            "supervisor_review",
+            report or "Supervisor task packet is incomplete.",
+            task_id,
+        ),
         "messages": [response],
     }
 
@@ -253,4 +263,5 @@ def supervisor_accept_agent(state: AgentState):
         "microarchitecture_report": "",
         "failed_stage": "",
         "blocking_report": "",
+        "review_feedback_log": [],
     }

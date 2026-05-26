@@ -219,6 +219,7 @@ class AgentState(TypedDict):
     run_status: str
     failed_stage: str
     blocking_report: str
+    review_feedback_log: List[Dict[str, str]]
     max_generated_file_bytes: int
     max_generated_files: int
     max_context_chars: int
@@ -799,6 +800,46 @@ def current_manager_handoff(state: "AgentState") -> str:
         "Full ordered Manager plan:\n"
         f"{render_manager_plan(state['manager_plan'])}"
     )
+
+
+def append_review_feedback(
+    state: "AgentState", stage: str, report: str, task_id: str | None = None
+) -> List[Dict[str, str]]:
+    feedback_log = list(state.get("review_feedback_log", []))
+    clean_report = str(report or "").strip()
+    if not clean_report:
+        clean_report = "Review failed without a detailed report."
+    if task_id is None:
+        try:
+            task_id = str(current_manager_task(state).get("id") or "global")
+        except (IndexError, KeyError, TypeError):
+            task_id = "global"
+    feedback_log.append(
+        {
+            "stage": str(stage),
+            "task_id": str(task_id),
+            "report": clean_report,
+        }
+    )
+    return feedback_log[-20:]
+
+
+def render_review_feedback(
+    state: "AgentState", stages: tuple[str, ...] | None = None, max_chars: int = 12000
+) -> str:
+    entries = state.get("review_feedback_log", [])
+    if stages:
+        stage_set = set(stages)
+        entries = [entry for entry in entries if entry.get("stage") in stage_set]
+    if not entries:
+        return "(none)"
+    rendered = []
+    for idx, entry in enumerate(entries, start=1):
+        rendered.append(
+            f"[{idx}] stage={entry.get('stage', 'unknown')} "
+            f"task={entry.get('task_id', 'global')}\n{entry.get('report', '').strip()}"
+        )
+    return clip_text("\n\n".join(rendered), max_chars)
 
 
 def validate_generated_files(
@@ -1562,6 +1603,7 @@ if __name__ == "__main__":
         "run_status": "",
         "failed_stage": "",
         "blocking_report": "",
+        "review_feedback_log": [],
         "max_generated_file_bytes": args.max_generated_file_bytes,
         "max_generated_files": args.max_generated_files,
         "max_context_chars": args.max_context_chars,

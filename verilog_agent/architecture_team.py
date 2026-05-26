@@ -15,11 +15,15 @@ def _with_runtime(fn):
 @_with_runtime
 def architecture_agent(state: AgentState):
     print("---ARCHITECT: Creating RTL Architecture Contract---")
-    review_feedback = ""
-    if state.get("architecture_review_report"):
+    review_feedback = render_review_feedback(
+        state,
+        ("architecture_review",),
+        state.get("max_context_chars", 120_000),
+    )
+    if review_feedback != "(none)":
         review_feedback = (
-            "\nPrevious architecture review feedback to fix:\n"
-            f"{state['architecture_review_report']}"
+            "Reviewer feedback that must be applied in this revision:\n"
+            f"{review_feedback}"
         )
     prompt = ChatPromptTemplate.from_messages(
         [
@@ -203,5 +207,8 @@ Architecture contract:
         "architecture_review_passed": False,
         "architecture_review_report": report or "Architecture contract is incomplete.",
         "architecture_retry_count": state.get("architecture_retry_count", 0) + 1,
+        "review_feedback_log": append_review_feedback(
+            state, "architecture_review", report or "Architecture contract is incomplete."
+        ),
         "messages": [response],
     }
