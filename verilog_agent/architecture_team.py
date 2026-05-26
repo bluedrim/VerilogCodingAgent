@@ -85,6 +85,9 @@ Manager plan:
 Manager handoff details:
 {manager_handoff}
 
+Previous architecture contract to revise, if any:
+{previous_architecture_contract}
+
 {review_feedback}
 """,
             ),
@@ -100,6 +103,7 @@ Manager handoff details:
                 "Original user requirement, authoritative source:\n"
                 f"{state['user_request']}"
             ),
+            "previous_architecture_contract": state.get("architecture_contract") or "(none)",
             "review_feedback": review_feedback,
         }
     )

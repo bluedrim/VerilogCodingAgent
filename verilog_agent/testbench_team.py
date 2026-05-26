@@ -15,6 +15,16 @@ def _with_runtime(fn):
 @_with_runtime
 def testbench_team_agent(state: AgentState):
     print("---TESTBENCH TEAM: Creating Smoke Testbench---")
+    feedback = render_review_feedback(
+        state,
+        ("testbench",),
+        state.get("max_context_chars", 120_000),
+    )
+    if feedback != "(none)":
+        feedback = (
+            "Previous testbench generation failure to fix:\n"
+            f"{feedback}"
+        )
     prompt = ChatPromptTemplate.from_messages(
         [
             (
@@ -47,6 +57,11 @@ Accepted RTL files:
 
 Top module candidates, in observed order:
 {top_module_candidates}
+
+Previous testbench files to revise, if any:
+{previous_testbench_files}
+
+{feedback}
 """,
             ),
         ]
@@ -58,6 +73,10 @@ Top module candidates, in observed order:
                 state.get("final_files", []), state.get("max_context_chars", 120_000)
             ),
             "top_module_candidates": ", ".join(state.get("top_module_candidates", [])) or "(unknown)",
+            "previous_testbench_files": render_files_for_prompt(
+                state.get("testbench_files", []), state.get("max_context_chars", 120_000)
+            ),
+            "feedback": feedback,
         }
     )
 
@@ -93,6 +112,7 @@ Top module candidates, in observed order:
             "testbench_retry_count": state.get("testbench_retry_count", 0) + 1,
             "failed_stage": "testbench",
             "blocking_report": report,
+            "review_feedback_log": append_review_feedback(state, "testbench", report, "testbench"),
             "messages": [response],
         }
 

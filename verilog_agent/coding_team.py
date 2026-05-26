@@ -89,6 +89,9 @@ Control/Data Path plan:
 
 Current RTL files:
 {rtl_context}
+
+Previous candidate RTL to revise, if any:
+{previous_candidate_rtl}
 {feedback}
 """,
             ),
@@ -105,6 +108,9 @@ Current RTL files:
             "rtl_context": clip_text(
                 state.get("rtl_context") or "(none)",
                 state.get("max_context_chars", 120_000),
+            ),
+            "previous_candidate_rtl": render_files_for_prompt(
+                state.get("candidate_files", []), state.get("max_context_chars", 120_000)
             ),
             "feedback": feedback,
         }

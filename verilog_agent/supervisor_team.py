@@ -95,6 +95,9 @@ Current Manager task:
 Existing RTL context:
 {rtl_context}
 
+Previous Supervisor task packet to revise, if any:
+{previous_supervisor_plan}
+
 Previous verification report, if any:
 {verification_report}
 
@@ -114,6 +117,7 @@ Previous verification report, if any:
                 state.get("rtl_context") or "(none)",
                 state.get("max_context_chars", 120_000),
             ),
+            "previous_supervisor_plan": state.get("supervisor_plan") or "(none)",
             "verification_report": state.get("verification_report") or "(none)",
             "review_feedback": review_feedback,
         }

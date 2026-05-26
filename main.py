@@ -38,25 +38,25 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--max-architecture-retries",
         type=positive_int,
-        default=2,
+        default=3,
         help="Maximum architecture review retries.",
     )
     parser.add_argument(
         "--max-supervisor-retries",
         type=positive_int,
-        default=2,
+        default=3,
         help="Maximum Supervisor review retries.",
     )
     parser.add_argument(
         "--max-control-datapath-retries",
         type=positive_int,
-        default=2,
+        default=3,
         help="Maximum Control/Data Path plan review retries.",
     )
     parser.add_argument(
         "--max-testbench-retries",
         type=positive_int,
-        default=2,
+        default=3,
         help="Maximum smoke testbench generation retries.",
     )
     parser.add_argument(
@@ -1342,7 +1342,7 @@ writer_tool_node = ToolNode(writer_tools)
 def coding_condition(state: AgentState):
     if state.get("generation_ok"):
         return "microarch_review"
-    if state.get("coding_retry_count", 0) >= state.get("max_retries", 3):
+    if state.get("coding_retry_count", 0) > state.get("max_retries", 3):
         print("---CONDITION: Max coding retries reached. Failing run before final review.---")
         return "fail"
     return "retry"
@@ -1351,7 +1351,7 @@ def coding_condition(state: AgentState):
 def architecture_review_condition(state: AgentState):
     if state.get("architecture_review_passed"):
         return "supervisor"
-    if state.get("architecture_retry_count", 0) >= state.get("max_architecture_retries", 2):
+    if state.get("architecture_retry_count", 0) > state.get("max_architecture_retries", 3):
         print("---CONDITION: Max architecture review retries reached. Continuing with latest contract.---")
         return "supervisor"
     return "retry"
@@ -1360,7 +1360,7 @@ def architecture_review_condition(state: AgentState):
 def supervisor_review_condition(state: AgentState):
     if state.get("supervisor_review_passed"):
         return "control_datapath"
-    if state.get("supervisor_retry_count", 0) >= state.get("max_supervisor_retries", 2):
+    if state.get("supervisor_retry_count", 0) > state.get("max_supervisor_retries", 3):
         print("---CONDITION: Max supervisor review retries reached. Continuing with latest task packet.---")
         return "control_datapath"
     return "retry"
@@ -1369,7 +1369,7 @@ def supervisor_review_condition(state: AgentState):
 def control_datapath_review_condition(state: AgentState):
     if state.get("control_datapath_review_passed"):
         return "coding"
-    if state.get("control_datapath_retry_count", 0) >= state.get("max_control_datapath_retries", 2):
+    if state.get("control_datapath_retry_count", 0) > state.get("max_control_datapath_retries", 3):
         print("---CONDITION: Max Control/Data Path review retries reached. Continuing with latest plan.---")
         return "coding"
     return "retry"
@@ -1378,7 +1378,7 @@ def control_datapath_review_condition(state: AgentState):
 def microarchitecture_condition(state: AgentState):
     if state.get("microarchitecture_passed"):
         return "verify"
-    if state.get("microarchitecture_retry_count", 0) >= state.get("max_retries", 3):
+    if state.get("microarchitecture_retry_count", 0) > state.get("max_retries", 3):
         print("---CONDITION: Max microarchitecture retries reached. Failing run before final review.---")
         return "fail"
     return "retry"
@@ -1387,7 +1387,7 @@ def microarchitecture_condition(state: AgentState):
 def verification_condition(state: AgentState):
     if state.get("verification_passed"):
         return "accept"
-    if state.get("verification_retry_count", 0) >= state.get("max_retries", 3):
+    if state.get("verification_retry_count", 0) > state.get("max_retries", 3):
         print("---CONDITION: Max verification retries reached. Failing run before final review.---")
         return "fail"
     return "retry"
@@ -1404,7 +1404,7 @@ def next_task_condition(state: AgentState):
 def testbench_condition(state: AgentState):
     if state.get("generation_ok"):
         return "final_lint"
-    if state.get("testbench_retry_count", 0) >= state.get("max_testbench_retries", 2):
+    if state.get("testbench_retry_count", 0) > state.get("max_testbench_retries", 3):
         print("---CONDITION: Max testbench retries reached. Failing run before final lint.---")
         return "fail"
     return "retry"
@@ -1588,6 +1588,7 @@ if __name__ == "__main__":
         "llm_timeout_seconds": args.llm_timeout
         if args.llm_timeout is not None
         else int(os.getenv("LLM_TIMEOUT_SECONDS", "180")),
+        "graph_recursion_limit": 100,
     }
     write_json_artifact("execution_config.json", execution_config)
 
@@ -1658,7 +1659,7 @@ if __name__ == "__main__":
         "error_message": "",
     }
     try:
-        result = app.invoke(initial_state)
+        result = app.invoke(initial_state, config={"recursion_limit": 100})
         print("\nProcess finished.")
         print("Generated files:")
         for message in result.get("messages", []):

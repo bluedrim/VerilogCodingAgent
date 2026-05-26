@@ -81,6 +81,9 @@ Supervisor detailed assignment:
 Existing RTL context:
 {rtl_context}
 
+Previous Control/Data Path plan to revise, if any:
+{previous_control_datapath_plan}
+
 Previous verification report, if any:
 {verification_report}
 
@@ -100,6 +103,7 @@ Previous verification report, if any:
                 state.get("rtl_context") or "(none)",
                 state.get("max_context_chars", 120_000),
             ),
+            "previous_control_datapath_plan": state.get("control_datapath_plan") or "(none)",
             "verification_report": state.get("verification_report") or "(none)",
             "review_feedback": review_feedback,
         }
