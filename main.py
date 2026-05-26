@@ -131,6 +131,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--llm-model", help="LLM model name, for example gpt-oss:20b or gpt-4.1.")
     parser.add_argument("--llm-temperature", type=bounded_temperature, help="LLM temperature.")
     parser.add_argument(
+        "--llm-timeout",
+        type=positive_int,
+        help="LLM request timeout in seconds. Set 0 to disable request timeout.",
+    )
+    parser.add_argument(
         "--llm-api-url",
         help="OpenAI-compatible chat completions URL, for example http://abc.net:30001/chat/completions.",
     )
@@ -204,6 +209,7 @@ class AgentState(TypedDict):
     lint_report: str
     require_lint: bool
     lint_timeout_seconds: int
+    llm_timeout_seconds: int
     allow_blackboxes: bool
     final_lint_passed: bool
     final_lint_report: str
@@ -242,6 +248,7 @@ def resolve_llm_settings(
     temperature: float | None = None,
     api_url: str | None = None,
     api_key: str | None = None,
+    timeout_seconds: int | None = None,
 ) -> Dict[str, object]:
     resolved_provider = (provider or os.getenv("LLM_PROVIDER") or "ollama").strip().lower()
     if resolved_provider not in {"ollama", "gpt-oss", "openai"}:
@@ -256,6 +263,11 @@ def resolve_llm_settings(
         or os.getenv("GPT_OSS_API_KEY")
         or os.getenv("LLM_API_KEY")
         or ""
+    )
+    resolved_timeout_seconds = (
+        timeout_seconds
+        if timeout_seconds is not None
+        else int(os.getenv("LLM_TIMEOUT_SECONDS", "180"))
     )
 
     if resolved_provider == "gpt-oss":
@@ -285,6 +297,7 @@ def resolve_llm_settings(
         "api_url": resolved_api_url,
         "base_url": base_url,
         "api_key": resolved_api_key,
+        "timeout_seconds": resolved_timeout_seconds,
     }
 
 
@@ -302,6 +315,7 @@ def public_llm_config(settings: Dict[str, object]) -> Dict[str, object]:
         "base_url": settings.get("base_url", ""),
         "api_key_set": bool(api_key),
         "api_key_redacted": redacted_key,
+        "timeout_seconds": settings.get("timeout_seconds", ""),
     }
 
 
@@ -316,11 +330,13 @@ def create_llm(
     temperature: float | None = None,
     api_url: str | None = None,
     api_key: str | None = None,
+    timeout_seconds: int | None = None,
 ):
-    settings = resolve_llm_settings(provider, model, temperature, api_url, api_key)
+    settings = resolve_llm_settings(provider, model, temperature, api_url, api_key, timeout_seconds)
     backend = str(settings["backend"])
     model_name = str(settings["model"])
     resolved_temperature = float(settings["temperature"])
+    resolved_timeout = int(settings.get("timeout_seconds") or 0)
 
     if backend in {"openai", "openai-compatible"}:
         try:
@@ -336,6 +352,8 @@ def create_llm(
             "temperature": resolved_temperature,
             "api_key": str(settings["api_key"] or "dummy"),
         }
+        if resolved_timeout > 0:
+            kwargs["timeout"] = resolved_timeout
         if settings["base_url"]:
             kwargs["base_url"] = str(settings["base_url"])
         return ChatOpenAI(**kwargs)
@@ -344,6 +362,9 @@ def create_llm(
         raise ValueError("Unsupported LLM backend. Supported backends: ollama, openai, openai-compatible")
 
     kwargs = {"model": model_name, "temperature": resolved_temperature}
+    if resolved_timeout > 0:
+        kwargs["client_kwargs"] = {"timeout": resolved_timeout}
+        kwargs["sync_client_kwargs"] = {"timeout": resolved_timeout}
     if settings["base_url"]:
         kwargs["base_url"] = str(settings["base_url"])
     return ChatOllama(**kwargs)
@@ -355,8 +376,11 @@ def llm_config(
     temperature: float | None = None,
     api_url: str | None = None,
     api_key: str | None = None,
+    timeout_seconds: int | None = None,
 ):
-    return public_llm_config(resolve_llm_settings(provider, model, temperature, api_url, api_key))
+    return public_llm_config(
+        resolve_llm_settings(provider, model, temperature, api_url, api_key, timeout_seconds)
+    )
 
 
 llm = None
@@ -1435,6 +1459,7 @@ if __name__ == "__main__":
         args.llm_temperature,
         args.llm_api_url,
         args.llm_api_key,
+        args.llm_timeout,
     )
     active_llm_config = llm_config(
         args.llm_provider,
@@ -1442,6 +1467,7 @@ if __name__ == "__main__":
         args.llm_temperature,
         args.llm_api_url,
         args.llm_api_key,
+        args.llm_timeout,
     )
     if args.auto_approve:
         os.environ["AUTO_APPROVE_FINAL"] = "true"
@@ -1475,6 +1501,9 @@ if __name__ == "__main__":
             "testbench": args.max_testbench_retries,
         },
         "llm_config": active_llm_config,
+        "llm_timeout_seconds": args.llm_timeout
+        if args.llm_timeout is not None
+        else int(os.getenv("LLM_TIMEOUT_SECONDS", "180")),
     }
     write_json_artifact("execution_config.json", execution_config)
 
@@ -1522,6 +1551,9 @@ if __name__ == "__main__":
         "require_lint": args.require_lint,
         "lint_timeout_seconds": args.lint_timeout,
         "allow_blackboxes": args.allow_blackboxes,
+        "llm_timeout_seconds": args.llm_timeout
+        if args.llm_timeout is not None
+        else int(os.getenv("LLM_TIMEOUT_SECONDS", "180")),
         "final_lint_passed": False,
         "final_lint_report": "",
         "human_approved": False,
