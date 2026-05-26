@@ -61,8 +61,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--artifact-dir",
-        default=os.getenv("ARTIFACT_DIR", "generated_rtl"),
-        help="Directory for generated artifacts and logs.",
+        default=None,
+        help=(
+            "Directory for generated artifacts and logs. "
+            "Defaults to output_<project_keyword>_<YYYYMMDD>_<HHMMSS>."
+        ),
     )
     parser.add_argument(
         "--auto-approve",
@@ -362,10 +365,58 @@ writer_tools = [write_verilog_file]
 ARTIFACT_DIR = Path(os.getenv("ARTIFACT_DIR", "generated_rtl"))
 
 
+PROJECT_KEYWORD_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "build",
+    "coding",
+    "create",
+    "design",
+    "for",
+    "generate",
+    "implement",
+    "make",
+    "module",
+    "rtl",
+    "systemverilog",
+    "that",
+    "the",
+    "verilog",
+    "with",
+}
+
+
 def sanitize_artifact_name(value: object, fallback: str = "item") -> str:
     text = str(value or "").strip()
     text = re.sub(r"[^a-zA-Z0-9_.-]+", "_", text).strip("._")
     return text or fallback
+
+
+def derive_project_keyword(requirement: str, fallback: str = "verilog_project") -> str:
+    words = re.findall(r"[A-Za-z][A-Za-z0-9_]{2,}", requirement.lower())
+    selected = []
+    for word in words:
+        if word in PROJECT_KEYWORD_STOPWORDS:
+            continue
+        if word not in selected:
+            selected.append(word)
+        if len(selected) >= 4:
+            break
+    return sanitize_artifact_name("_".join(selected), fallback)
+
+
+def default_output_dir(requirement: str, timestamp: datetime) -> Path:
+    keyword = derive_project_keyword(requirement)
+    return Path(f"output_{keyword}_{timestamp.strftime('%Y%m%d_%H%M%S')}")
+
+
+def resolve_artifact_dir(args: argparse.Namespace, requirement: str, timestamp: datetime) -> Path:
+    configured_dir = args.artifact_dir or os.getenv("ARTIFACT_DIR")
+    if configured_dir:
+        return Path(configured_dir)
+    return default_output_dir(requirement, timestamp)
 
 
 def artifact_path(relative_path: str) -> Path:
@@ -1312,7 +1363,17 @@ app = workflow.compile()
 # --- 7. Run the Application ---
 if __name__ == "__main__":
     args = parse_args()
-    ARTIFACT_DIR = Path(args.artifact_dir)
+    user_request_input = args.spec or ""
+    if not user_request_input.strip():
+        user_request_input = input(
+            "Describe the RTL you want to build, or enter a spec file path / @path (or 'exit'): "
+        ).strip()
+    if user_request_input.lower() == "exit":
+        sys.exit("Exiting.")
+    initial_user_request = read_user_requirement(user_request_input)
+
+    run_timestamp = datetime.now()
+    ARTIFACT_DIR = resolve_artifact_dir(args, initial_user_request, run_timestamp)
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     llm = create_llm(
         args.llm_provider,
@@ -1335,6 +1396,9 @@ if __name__ == "__main__":
         "run_id": run_id,
         "argv": sys.argv[1:],
         "artifact_dir": str(ARTIFACT_DIR),
+        "artifact_dir_auto_named": not bool(args.artifact_dir or os.getenv("ARTIFACT_DIR")),
+        "artifact_dir_timestamp": run_timestamp.strftime("%Y-%m-%d %H:%M:%S"),
+        "project_keyword": derive_project_keyword(initial_user_request),
         "auto_approve": args.auto_approve,
         "skip_testbench": args.no_testbench,
         "require_lint": args.require_lint,
@@ -1368,7 +1432,7 @@ if __name__ == "__main__":
     initial_state = {
         "messages": [],
         "run_id": run_id,
-        "user_request": args.spec or "",
+        "user_request": initial_user_request,
         "manager_plan": [],
         "architecture_contract": "",
         "architecture_review_passed": False,
