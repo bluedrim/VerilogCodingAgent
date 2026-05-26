@@ -388,42 +388,72 @@ def _strip_json_fence(raw_content: str) -> str:
     return content
 
 
+def _balanced_json_end(content: str, start: int) -> int:
+    opener = content[start]
+    closer = {"[": "]", "{": "}"}.get(opener)
+    if closer is None:
+        return -1
+
+    depth = 0
+    in_string = False
+    escape = False
+    for idx in range(start, len(content)):
+        char = content[idx]
+        if escape:
+            escape = False
+            continue
+        if char == "\\":
+            escape = True
+            continue
+        if char == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if char == opener:
+            depth += 1
+        elif char == closer:
+            depth -= 1
+            if depth == 0:
+                return idx
+    return -1
+
+
+def _json_candidates(content: str) -> List[str]:
+    candidates = []
+    idx = 0
+    while idx < len(content):
+        if content[idx] in "[{":
+            end = _balanced_json_end(content, idx)
+            if end != -1:
+                candidates.append(content[idx : end + 1])
+                idx = end + 1
+                continue
+        idx += 1
+    return candidates
+
+
 def _extract_json_candidate(raw_content: str) -> str:
     content = _strip_json_fence(raw_content)
-
-    for opener, closer in (("[", "]"), ("{", "}")):
-        start = content.find(opener)
-        if start == -1:
-            continue
-
-        depth = 0
-        in_string = False
-        escape = False
-        for idx in range(start, len(content)):
-            char = content[idx]
-            if escape:
-                escape = False
-                continue
-            if char == "\\":
-                escape = True
-                continue
-            if char == '"':
-                in_string = not in_string
-                continue
-            if in_string:
-                continue
-            if char == opener:
-                depth += 1
-            elif char == closer:
-                depth -= 1
-                if depth == 0:
-                    return content[start : idx + 1]
-
+    candidates = _json_candidates(content)
+    if candidates:
+        return candidates[-1]
     return content
 
 
 def _load_json(raw_content: str):
-    return json.loads(_extract_json_candidate(raw_content))
+    content = _strip_json_fence(raw_content)
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError as first_error:
+        last_error = first_error
+
+    for candidate in reversed(_json_candidates(content)):
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError as exc:
+            last_error = exc
+    raise last_error
 
 
 TRUE_REVIEW_VALUES = {
