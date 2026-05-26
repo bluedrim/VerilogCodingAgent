@@ -511,6 +511,7 @@ TRUE_REVIEW_VALUES = {
     "true",
     "pass",
     "passed",
+    "pass_with_warnings",
     "yes",
     "ok",
     "success",
@@ -532,6 +533,7 @@ FALSE_REVIEW_VALUES = {
     "needs change",
     "request_changes",
     "request changes",
+    "changes_requested",
     "reject",
     "rejected",
     "denied",
@@ -558,24 +560,49 @@ def _parse_review_json_result(result: object):
     if not isinstance(result, dict):
         raise TypeError("Review JSON result must be an object.")
 
+    result = {_normalize_review_key(key): value for key, value in result.items()}
     passed = _review_pass_value(result)
     report = _review_report_value(result)
     return passed, report
 
 
 def _review_pass_value(result: Dict[str, object]) -> bool:
-    for key in ("pass", "passed", "ok", "success", "valid", "approved", "accepted"):
+    pass_keys = (
+        "pass",
+        "passed",
+        "is_passed",
+        "review_passed",
+        "passed_review",
+        "ok",
+        "success",
+        "valid",
+        "approved",
+        "accepted",
+    )
+    for key in pass_keys:
         if key in result:
             return _json_bool(result.get(key))
 
-    for key in ("fail", "failed", "error", "invalid", "rejected"):
+    failure_keys = (
+        "fail",
+        "failed",
+        "has_failures",
+        "has_errors",
+        "error",
+        "invalid",
+        "rejected",
+        "needs_changes",
+        "changes_requested",
+        "request_changes",
+    )
+    for key in failure_keys:
         if key in result:
             return _negated_failure_value(result.get(key))
 
-    for key in ("result", "status", "verdict", "decision"):
+    for key in ("result", "status", "verdict", "decision", "outcome", "review", "review_result"):
         if key not in result:
             continue
-        value = str(result.get(key, "")).strip().lower()
+        value = _normalize_review_token(result.get(key))
         if value in TRUE_REVIEW_VALUES:
             return True
         if value in FALSE_REVIEW_VALUES:
@@ -584,7 +611,17 @@ def _review_pass_value(result: Dict[str, object]) -> bool:
 
 
 def _review_report_value(result: Dict[str, object]) -> str:
-    for key in ("report", "reason", "feedback", "summary", "message", "details", "findings"):
+    for key in (
+        "report",
+        "reason",
+        "feedback",
+        "summary",
+        "message",
+        "details",
+        "findings",
+        "comments",
+        "notes",
+    ):
         value = result.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()
@@ -595,9 +632,11 @@ def _review_report_value(result: Dict[str, object]) -> str:
 
 def _parse_review_text_verdict(raw_content: str) -> Optional[bool]:
     lowered = raw_content.strip().lower()
+    if re.search(r"\b(no|without)\s+(failures?|errors?|issues?|blocking\s+issues?)\b", lowered):
+        return True
     if re.search(r"\b(fail|failed|reject|rejected|invalid|not\s+pass|does\s+not\s+pass)\b", lowered):
         return False
-    if re.search(r"\b(pass|passed|approve|approved|ok|valid|success)\b", lowered):
+    if re.search(r"\b(pass|passed|approve|approved|ok|valid|success|looks\s+good)\b", lowered):
         return True
     return None
 
@@ -617,7 +656,7 @@ def _json_bool(value: object) -> bool:
     if isinstance(value, (int, float)):
         return bool(value)
     if isinstance(value, str):
-        return value.strip().lower() in TRUE_REVIEW_VALUES
+        return _normalize_review_token(value) in TRUE_REVIEW_VALUES
     return False
 
 
@@ -627,12 +666,27 @@ def _negated_failure_value(value: object) -> bool:
     if isinstance(value, (int, float)):
         return not bool(value)
     if isinstance(value, str):
-        stripped = value.strip().lower()
+        stripped = _normalize_review_token(value)
         if stripped in BOOLEAN_FALSE_VALUES:
             return True
         if stripped in TRUE_REVIEW_VALUES or stripped in FALSE_REVIEW_VALUES:
             return False
     return False
+
+
+def _normalize_review_key(key: object) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", str(key).strip().lower()).strip("_")
+
+
+def _normalize_review_token(value: object) -> str:
+    token = str(value or "").strip().lower()
+    token = re.sub(r"^[^a-z0-9]+|[^a-z0-9]+$", "", token)
+    token = re.sub(r"[^a-z0-9]+", "_", token)
+    if token.startswith("pass_"):
+        return "pass"
+    if token.startswith("approved_") or token.startswith("approve_"):
+        return "approved"
+    return token
 
 
 def validate_plan(plan: object, max_tasks: int = 32):

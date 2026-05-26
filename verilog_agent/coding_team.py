@@ -229,6 +229,10 @@ RTL candidate:
         report = f"Static microarchitecture scan failed:\n{static_result['report']}\n\n{report}"
 
     write_text_artifact(
+        f"logs/{task_id}_microarchitecture_review_raw_attempt_{state.get('microarchitecture_retry_count', 0) + 1}.txt",
+        response.content,
+    )
+    write_text_artifact(
         f"logs/{task_id}_microarchitecture_review_attempt_{state.get('microarchitecture_retry_count', 0) + 1}.md",
         report or ("PASS" if passed else "FAIL"),
     )

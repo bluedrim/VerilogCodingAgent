@@ -182,6 +182,10 @@ Architecture contract:
     )
 
     write_text_artifact(
+        f"logs/architecture_review_raw_attempt_{state.get('architecture_retry_count', 0) + 1}.txt",
+        response.content,
+    )
+    write_text_artifact(
         f"logs/architecture_review_attempt_{state.get('architecture_retry_count', 0) + 1}.md",
         report or ("PASS" if passed else "FAIL"),
     )

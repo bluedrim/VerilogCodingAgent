@@ -175,6 +175,10 @@ Control/Data Path plan:
     )
 
     write_text_artifact(
+        f"logs/{task_id}_control_datapath_review_raw_attempt_{state.get('control_datapath_retry_count', 0) + 1}.txt",
+        response.content,
+    )
+    write_text_artifact(
         f"logs/{task_id}_control_datapath_review_attempt_{state.get('control_datapath_retry_count', 0) + 1}.md",
         report or ("PASS" if passed else "FAIL"),
     )

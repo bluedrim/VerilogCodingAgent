@@ -134,6 +134,10 @@ RTL candidate to verify:
         "Verification output was not valid JSON. Re-run coding with clearer, self-checkable RTL.",
     )
 
+    write_text_artifact(
+        f"logs/{task_id}_verification_raw_attempt_{state.get('verification_retry_count', 0) + 1}.txt",
+        response.content,
+    )
     if passed:
         print("---VERIFICATION TEAM: PASS---")
         write_text_artifact(

@@ -193,6 +193,10 @@ Supervisor task packet:
     )
 
     write_text_artifact(
+        f"logs/{task_id}_supervisor_review_raw_attempt_{state.get('supervisor_retry_count', 0) + 1}.txt",
+        response.content,
+    )
+    write_text_artifact(
         f"logs/{task_id}_supervisor_review_attempt_{state.get('supervisor_retry_count', 0) + 1}.md",
         report or ("PASS" if passed else "FAIL"),
     )
