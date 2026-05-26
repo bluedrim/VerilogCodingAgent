@@ -9,7 +9,7 @@ import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Annotated, Dict, List, TypedDict
+from typing import Annotated, Dict, List, Optional, TypedDict
 
 
 def positive_int(raw_value: str) -> int:
@@ -426,19 +426,110 @@ def _load_json(raw_content: str):
     return json.loads(_extract_json_candidate(raw_content))
 
 
+TRUE_REVIEW_VALUES = {
+    "true",
+    "pass",
+    "passed",
+    "yes",
+    "ok",
+    "success",
+    "successful",
+    "valid",
+    "approve",
+    "approved",
+    "accepted",
+}
+FALSE_REVIEW_VALUES = {
+    "false",
+    "fail",
+    "failed",
+    "no",
+    "ng",
+    "error",
+    "invalid",
+    "reject",
+    "rejected",
+    "denied",
+    "deny",
+}
+
+
 def parse_review_result(raw_content: str, invalid_json_report: str):
     try:
         result = _load_json(raw_content)
-        return _json_bool(result.get("pass")), str(result.get("report", "")).strip()
-    except (json.JSONDecodeError, AttributeError):
-        return False, invalid_json_report
+        return _parse_review_json_result(result)
+    except (json.JSONDecodeError, AttributeError, TypeError, ValueError):
+        fallback_passed = _parse_review_text_verdict(raw_content)
+        report = _compact_review_text(raw_content) or invalid_json_report
+        if fallback_passed is None:
+            return False, invalid_json_report
+        return fallback_passed, report
+
+
+def _parse_review_json_result(result: object):
+    if isinstance(result, list) and len(result) == 1:
+        result = result[0]
+    if not isinstance(result, dict):
+        raise TypeError("Review JSON result must be an object.")
+
+    passed = _review_pass_value(result)
+    report = _review_report_value(result)
+    return passed, report
+
+
+def _review_pass_value(result: Dict[str, object]) -> bool:
+    for key in ("pass", "passed", "ok", "success", "valid", "approved", "accepted"):
+        if key in result:
+            return _json_bool(result.get(key))
+
+    for key in ("fail", "failed", "error", "invalid", "rejected"):
+        if key in result and _json_bool(result.get(key)):
+            return False
+
+    for key in ("result", "status", "verdict", "decision"):
+        if key not in result:
+            continue
+        value = str(result.get(key, "")).strip().lower()
+        if value in TRUE_REVIEW_VALUES:
+            return True
+        if value in FALSE_REVIEW_VALUES:
+            return False
+    return False
+
+
+def _review_report_value(result: Dict[str, object]) -> str:
+    for key in ("report", "reason", "feedback", "summary", "message", "details", "findings"):
+        value = result.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        if isinstance(value, list) and value:
+            return "\n".join(str(item).strip() for item in value if str(item).strip())
+    return json.dumps(result, ensure_ascii=False)
+
+
+def _parse_review_text_verdict(raw_content: str) -> Optional[bool]:
+    lowered = raw_content.strip().lower()
+    if re.search(r"\b(fail|failed|reject|rejected|invalid|not\s+pass|does\s+not\s+pass)\b", lowered):
+        return False
+    if re.search(r"\b(pass|passed|approve|approved|ok|valid|success)\b", lowered):
+        return True
+    return None
+
+
+def _compact_review_text(raw_content: str, limit: int = 2000) -> str:
+    compact = raw_content.strip()
+    if not compact:
+        return ""
+    if len(compact) <= limit:
+        return compact
+    return compact[:limit] + "\n... [truncated]"
 
 
 def _json_bool(value: object) -> bool:
     if isinstance(value, bool):
         return value
     if isinstance(value, str):
-        return value.strip().lower() in {"true", "pass", "passed", "yes"}
+        return value.strip().lower() in TRUE_REVIEW_VALUES
     return False
 
 
@@ -571,15 +662,101 @@ def validate_generated_files(
     return True, ""
 
 
-def normalize_generated_files(files: List[Dict[str, str]]) -> List[Dict[str, str]]:
+FILENAME_ALIASES = ("filename", "file_name", "path", "filepath", "file", "name")
+CONTENT_ALIASES = (
+    "content",
+    "code",
+    "source",
+    "text",
+    "body",
+    "verilog",
+    "systemverilog",
+)
+FILES_PAYLOAD_ALIASES = (
+    "files",
+    "rtl_files",
+    "generated_files",
+    "outputs",
+    "artifacts",
+    "testbench_files",
+)
+
+
+def _first_present(mapping: Dict[str, object], keys: tuple) -> object:
+    for key in keys:
+        if key in mapping and mapping[key] not in (None, ""):
+            return mapping[key]
+    return None
+
+
+def _unwrap_files_payload(payload: object) -> List[object]:
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict):
+        for key in FILES_PAYLOAD_ALIASES:
+            value = payload.get(key)
+            if isinstance(value, list):
+                return value
+        if _first_present(payload, FILENAME_ALIASES) or _first_present(payload, CONTENT_ALIASES):
+            return [payload]
+    raise ValueError("Coding output must be a JSON list or an object containing a files list.")
+
+
+def _strip_markdown_code_fence(content: str) -> str:
+    text = content.strip()
+    match = re.fullmatch(r"```(?:[a-zA-Z0-9_+-]+)?\s*\n(.*?)\n?```", text, flags=re.S)
+    if match:
+        return match.group(1).strip()
+    return content
+
+
+def _infer_filename_from_content(content: str, index: int) -> str:
+    match = re.search(r"\b(?:module|interface|package|primitive)\s+([a-zA-Z_][a-zA-Z0-9_$]*)\b", content)
+    if match:
+        return f"{match.group(1)}.sv"
+    return f"generated_{index + 1}.sv"
+
+
+def _normalize_filename(raw_filename: object, content: str, index: int) -> str:
+    if raw_filename is None:
+        filename = _infer_filename_from_content(content, index)
+    else:
+        filename = Path(str(raw_filename).strip()).name
+        if not filename:
+            filename = _infer_filename_from_content(content, index)
+    filename = re.sub(r"[^a-zA-Z0-9_.-]", "_", filename)
+    filename = filename.lstrip(".") or _infer_filename_from_content(content, index)
+    if Path(filename).suffix.lower() not in {".v", ".sv", ".vh", ".svh"}:
+        filename += ".sv"
+    return filename
+
+
+def normalize_generated_files(files: object) -> List[Dict[str, str]]:
     normalized = []
-    for file_info in files:
-        normalized.append(
-            {
-                "filename": str(file_info["filename"]).strip(),
-                "content": str(file_info["content"]).replace("\r\n", "\n").replace("\r", "\n"),
-            }
-        )
+    seen_filenames = set()
+    for idx, file_info in enumerate(_unwrap_files_payload(files)):
+        if not isinstance(file_info, dict):
+            raise ValueError(f"Item {idx} must be an object.")
+
+        raw_content = _first_present(file_info, CONTENT_ALIASES)
+        if isinstance(raw_content, list):
+            raw_content = "\n".join(str(line) for line in raw_content)
+        if raw_content is None:
+            raise ValueError(f"Item {idx} must include content/code/source.")
+
+        content = _strip_markdown_code_fence(str(raw_content))
+        content = content.replace("\r\n", "\n").replace("\r", "\n")
+        filename = _normalize_filename(_first_present(file_info, FILENAME_ALIASES), content, idx)
+
+        unique_filename = filename
+        duplicate_count = 2
+        while unique_filename in seen_filenames:
+            path = Path(filename)
+            unique_filename = f"{path.stem}_{duplicate_count}{path.suffix}"
+            duplicate_count += 1
+        seen_filenames.add(unique_filename)
+
+        normalized.append({"filename": unique_filename, "content": content})
     return normalized
 
 
@@ -1567,7 +1744,11 @@ Rules:
 - Prefer always_ff/always_comb in .sv files; if using .v, use equivalent clean sequential/combinational structure.
 - Give every registered control and datapath signal an explicit reset or documented reason it does not need one.
 - Include meaningful parameters and comments only where they clarify non-obvious logic.
-- Return only raw JSON: a list of objects with keys filename and content.
+- Return only raw JSON, with no markdown fences or surrounding prose.
+- Preferred schema:
+  [
+    {"filename": "module_name.sv", "content": "complete file content"}
+  ]
 - Each content value must contain the complete file content.
 """,
             ),
@@ -1639,7 +1820,7 @@ Current RTL files:
             "blocking_report": "",
             "error_message": "",
         }
-    except (json.JSONDecodeError, ValueError) as exc:
+    except (json.JSONDecodeError, TypeError, ValueError) as exc:
         print(f"---ERROR: Coding team produced invalid JSON: {exc}---")
         write_text_artifact(
             f"failed_attempts/{task_id}_invalid_json_attempt_{state.get('coding_retry_count', 0) + 1}.txt",
@@ -1977,7 +2158,11 @@ Rules:
 - Instantiate the most likely top module from the RTL context.
 - Generate clock/reset stimulus when ports indicate clock/reset.
 - Drive simple deterministic stimulus and finish the simulation.
-- Return only raw JSON: a list of objects with keys filename and content.
+- Return only raw JSON, with no markdown fences or surrounding prose.
+- Preferred schema:
+  [
+    {"filename": "tb_top.sv", "content": "complete testbench file content"}
+  ]
 """,
             ),
             (
@@ -2023,7 +2208,7 @@ Top module candidates, in observed order:
             "blocking_report": "",
             "messages": [response],
         }
-    except (json.JSONDecodeError, ValueError) as exc:
+    except (json.JSONDecodeError, TypeError, ValueError) as exc:
         print(f"---ERROR: Testbench team produced invalid JSON: {exc}---")
         write_text_artifact(
             f"failed_attempts/testbench_invalid_json_attempt_{state.get('testbench_retry_count', 0) + 1}.txt",
