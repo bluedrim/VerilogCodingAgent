@@ -45,7 +45,8 @@ Include:
 - Clock-domain and reset-domain assumptions.
 - Error, saturation, overflow/underflow, invalid input, and backpressure behavior.
 - Parameterization policy.
-- Coding constraints for synthesizable RTL.
+- Coding constraints for synthesizable Verilog-2001 RTL only.
+- Do not propose SystemVerilog constructs; use .v/.vh files, reg/wire, assign, always @(*), and always @(posedge ...).
 - Architecture traceability matrix mapping user requirements and Manager tasks to architecture decisions.
 - Open questions/TBD list. Do not hide unknowns.
 - Verification intent, corner cases, and acceptance criteria.
@@ -138,6 +139,7 @@ Required architecture coverage:
 - Requirement-to-architecture traceability.
 - Open TBDs clearly listed.
 - Verification intent and acceptance criteria.
+- Verilog-2001-only coding constraints with no SystemVerilog constructs.
 
 Pass policy:
 - PASS when the contract is implementation-ready for the current user requirement.

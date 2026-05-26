@@ -63,6 +63,8 @@ Include these Markdown sections:
    - Overflow/underflow, invalid inputs, simultaneous events, boundary values.
 8. Implementation Checklist
    - Concrete items the Coding Team must implement.
+   - Require synthesizable Verilog-2001 only: .v/.vh files, reg/wire, assign, always @(*), always @(posedge ...).
+   - Forbid SystemVerilog constructs including logic, always_ff, always_comb, interface, package, typedef, enum, struct, unique, assert, and import.
 9. Verification Checklist
    - Concrete items the Verification Team must check.
 10. Handoff Notes

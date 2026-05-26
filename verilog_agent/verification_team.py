@@ -77,6 +77,8 @@ Review the candidate RTL against the user requirement, Manager task, and Supervi
 
 Check:
 - Synthesizability and obvious syntax issues.
+- Verilog-2001 only: .v/.vh files, reg/wire, assign, always @(*), always @(posedge ...).
+- No SystemVerilog constructs such as logic, always_ff, always_comb, interface, package, typedef, enum, struct, unique, assert, or import.
 - Module/interface consistency across files.
 - Clock/reset behavior.
 - State-machine and datapath correctness.

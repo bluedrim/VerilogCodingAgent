@@ -114,7 +114,7 @@ Rules:
                 "behavior": state["user_request"],
                 "edge_cases": "TBD: identify boundary values, simultaneous events, overflow/underflow, invalid inputs, and backpressure.",
                 "acceptance_criteria": "Generated RTL must satisfy the original user requirement and pass sanity, lint when available, microarchitecture review, and verification review.",
-                "deliverable": "Complete synthesizable Verilog/SystemVerilog RTL.",
+                "deliverable": "Complete synthesizable Verilog-2001 RTL using .v/.vh files only.",
                 "notes": "Fallback plan created because Manager output was not valid structured JSON.",
             }
         ]

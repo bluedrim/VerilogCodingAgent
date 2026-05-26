@@ -867,8 +867,8 @@ def validate_generated_files(
             return False, f"Item {idx} filename must not include path segments."
         if re.search(r"[^a-zA-Z0-9_.-]", filename):
             return False, f"Item {idx} filename contains unsupported characters."
-        if Path(filename).suffix.lower() not in {".v", ".sv", ".vh", ".svh"}:
-            return False, f"Item {idx} has unsupported extension."
+        if Path(filename).suffix.lower() not in {".v", ".vh"}:
+            return False, f"Item {idx} must use Verilog-only .v or .vh extension."
         if not isinstance(file_info["content"], str) or not file_info["content"].strip():
             return False, f"Item {idx} has invalid content."
         content = file_info["content"]
@@ -876,11 +876,55 @@ def validate_generated_files(
             return False, f"Item {idx} exceeds max file size of {max_file_bytes} bytes."
         if any(marker in content for marker in ("<<<<<<<", "=======", ">>>>>>>")):
             return False, f"Item {idx} contains unresolved conflict markers."
-        if Path(filename).suffix.lower() in {".v", ".sv"} and not re.search(
-            r"\b(module|interface|package|primitive)\b", content
+        stripped_content = strip_hdl_comments(content)
+        sv_error = find_systemverilog_construct(stripped_content)
+        if sv_error:
+            return False, f"Item {idx} uses SystemVerilog construct: {sv_error}."
+        if Path(filename).suffix.lower() == ".v" and not re.search(
+            r"\b(module|primitive)\b", stripped_content
         ):
-            return False, f"Item {idx} source file must contain a Verilog/SystemVerilog design unit."
+            return False, f"Item {idx} source file must contain a Verilog module or primitive."
     return True, ""
+
+
+def strip_hdl_comments(content: str) -> str:
+    return re.sub(r"//.*?$|/\*.*?\*/", "", content, flags=re.S | re.M)
+
+
+def find_systemverilog_construct(content: str) -> str:
+    patterns = [
+        (r"\balways_ff\b", "always_ff"),
+        (r"\balways_comb\b", "always_comb"),
+        (r"\balways_latch\b", "always_latch"),
+        (r"\blogic\b", "logic"),
+        (r"\bbit\b", "bit"),
+        (r"\bbyte\b", "byte"),
+        (r"\bshortint\b", "shortint"),
+        (r"\bint\b", "int"),
+        (r"\blongint\b", "longint"),
+        (r"\btypedef\b", "typedef"),
+        (r"\benum\b", "enum"),
+        (r"\bstruct\b", "struct"),
+        (r"\bunion\b", "union"),
+        (r"\binterface\b", "interface"),
+        (r"\bendinterface\b", "endinterface"),
+        (r"\bmodport\b", "modport"),
+        (r"\bpackage\b", "package"),
+        (r"\bendpackage\b", "endpackage"),
+        (r"\bimport\b", "import"),
+        (r"\bclass\b", "class"),
+        (r"\bendclass\b", "endclass"),
+        (r"\bunique\b", "unique"),
+        (r"\bpriority\b", "priority"),
+        (r"\bfinal\b", "final"),
+        (r"\bassert\b", "assert"),
+        (r"\bcovergroup\b", "covergroup"),
+        (r"\bproperty\b", "property"),
+    ]
+    for pattern, name in patterns:
+        if re.search(pattern, content):
+            return name
+    return ""
 
 
 FILENAME_ALIASES = ("filename", "file_name", "path", "filepath", "file", "name")
@@ -932,10 +976,10 @@ def _strip_markdown_code_fence(content: str) -> str:
 
 
 def _infer_filename_from_content(content: str, index: int) -> str:
-    match = re.search(r"\b(?:module|interface|package|primitive)\s+([a-zA-Z_][a-zA-Z0-9_$]*)\b", content)
+    match = re.search(r"\b(?:module|primitive)\s+([a-zA-Z_][a-zA-Z0-9_$]*)\b", content)
     if match:
-        return f"{match.group(1)}.sv"
-    return f"generated_{index + 1}.sv"
+        return f"{match.group(1)}.v"
+    return f"generated_{index + 1}.v"
 
 
 def _normalize_filename(raw_filename: object, content: str, index: int) -> str:
@@ -947,8 +991,8 @@ def _normalize_filename(raw_filename: object, content: str, index: int) -> str:
             filename = _infer_filename_from_content(content, index)
     filename = re.sub(r"[^a-zA-Z0-9_.-]", "_", filename)
     filename = filename.lstrip(".") or _infer_filename_from_content(content, index)
-    if Path(filename).suffix.lower() not in {".v", ".sv", ".vh", ".svh"}:
-        filename += ".sv"
+    if Path(filename).suffix.lower() not in {".v", ".vh"}:
+        filename = f"{Path(filename).stem}.v"
     return filename
 
 
@@ -1112,12 +1156,10 @@ def hdl_sort_key(file_info: Dict[str, str]):
     filename = file_info["filename"]
     content = file_info["content"]
     suffix = Path(filename).suffix.lower()
-    if suffix in {".vh", ".svh"}:
+    if suffix == ".vh":
         group = 0
-    elif re.search(r"\bpackage\b", content):
-        group = 1
     else:
-        group = 2
+        group = 1
     return group, filename
 
 
@@ -1163,8 +1205,11 @@ def static_microarchitecture_review(files: List[Dict[str, str]]) -> Dict[str, ob
     combined = "\n".join(file_info["content"] for file_info in files)
     blockers = []
     warnings = []
-    sequential_blocks = len(re.findall(r"\balways_ff\b|always\s*@\s*\(", combined))
-    combinational_blocks = len(re.findall(r"\balways_comb\b|always\s*@\s*\*", combined))
+    sv_error = find_systemverilog_construct(strip_hdl_comments(combined))
+    if sv_error:
+        blockers.append(f"SystemVerilog construct is not allowed: {sv_error}")
+    sequential_blocks = len(re.findall(r"always\s*@\s*\(", combined))
+    combinational_blocks = len(re.findall(r"always\s*@\s*\*", combined))
     control_terms = re.findall(r"\b(state|next_state|enable|valid|ready|done|error|load|clear)\b", combined)
     datapath_terms = re.findall(r"\b(count|counter|data|accum|sum|addr|ptr|fifo|mem|result)\b", combined)
     has_clocked_interface = bool(re.search(r"\b(clk|clock|reset|rst_n|rst)\b", combined))
@@ -1177,8 +1222,6 @@ def static_microarchitecture_review(files: List[Dict[str, str]]) -> Dict[str, ob
         warnings.append("few explicit control signal names found")
     if len(datapath_terms) < 2:
         warnings.append("few explicit datapath signal names found")
-    if re.search(r"\balways_ff\b", combined) and not re.search(r"\balways_comb\b", combined):
-        warnings.append("always_ff is used but always_comb next/control logic is not visible")
 
     if blockers:
         report = "\n".join(blockers + [f"warning: {warning}" for warning in warnings])
@@ -1254,7 +1297,7 @@ def run_syntax_lint(
         if Path(lint_tool).name == "verilator":
             cmd = [lint_tool, "--lint-only", "--timing"] + [str(path) for path in file_paths]
         else:
-            cmd = [lint_tool, "-tnull", "-g2012"] + [str(path) for path in file_paths]
+            cmd = [lint_tool, "-tnull", "-g2005"] + [str(path) for path in file_paths]
 
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_seconds)

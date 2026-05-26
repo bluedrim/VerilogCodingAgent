@@ -47,8 +47,9 @@ Include these sections:
 3. Timing Contract
    - Latency, throughput, handshake assumptions, and backpressure handling.
 4. Coding Guidance
-   - Recommended always_comb/always_ff block structure.
+   - Recommended Verilog-2001 always @(*) and always @(posedge clk ...) block structure.
    - Signals that should be separated into next-state, registered-state, control, and datapath groups.
+   - Use reg/wire only; do not request SystemVerilog logic, always_ff, always_comb, interface, package, typedef, enum, or struct.
 5. Verification Focus
    - Specific corner cases the Verification Team must check for this task.
 6. Implementation Checklist
