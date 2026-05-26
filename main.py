@@ -477,11 +477,16 @@ FALSE_REVIEW_VALUES = {
     "ng",
     "error",
     "invalid",
+    "needs_changes",
+    "needs change",
+    "request_changes",
+    "request changes",
     "reject",
     "rejected",
     "denied",
     "deny",
 }
+BOOLEAN_FALSE_VALUES = {"false", "no", "0", "none", "null", "n/a"}
 
 
 def parse_review_result(raw_content: str, invalid_json_report: str):
@@ -513,8 +518,8 @@ def _review_pass_value(result: Dict[str, object]) -> bool:
             return _json_bool(result.get(key))
 
     for key in ("fail", "failed", "error", "invalid", "rejected"):
-        if key in result and _json_bool(result.get(key)):
-            return False
+        if key in result:
+            return _negated_failure_value(result.get(key))
 
     for key in ("result", "status", "verdict", "decision"):
         if key not in result:
@@ -558,8 +563,24 @@ def _compact_review_text(raw_content: str, limit: int = 2000) -> str:
 def _json_bool(value: object) -> bool:
     if isinstance(value, bool):
         return value
+    if isinstance(value, (int, float)):
+        return bool(value)
     if isinstance(value, str):
         return value.strip().lower() in TRUE_REVIEW_VALUES
+    return False
+
+
+def _negated_failure_value(value: object) -> bool:
+    if isinstance(value, bool):
+        return not value
+    if isinstance(value, (int, float)):
+        return not bool(value)
+    if isinstance(value, str):
+        stripped = value.strip().lower()
+        if stripped in BOOLEAN_FALSE_VALUES:
+            return True
+        if stripped in TRUE_REVIEW_VALUES or stripped in FALSE_REVIEW_VALUES:
+            return False
     return False
 
 
@@ -1229,6 +1250,25 @@ Include:
 - Open questions/TBD list. Do not hide unknowns.
 - Verification intent, corner cases, and acceptance criteria.
 
+Use these exact Markdown sections:
+1. Top-Level Architecture
+2. Clock and Reset Contract
+3. External Interface Contract
+4. Module Decomposition
+5. Control Logic Plan
+6. Datapath Plan
+7. State, Counters, Registers, and Memories
+8. Timing, Latency, Throughput, and Handshakes
+9. Error and Boundary Behavior
+10. Parameterization and Coding Constraints
+11. Requirement Traceability
+12. Verification Intent and Acceptance Criteria
+13. Open Questions and Assumptions
+
+If a category is not relevant to the user's requirement, explicitly mark it N/A and explain why.
+Use TBD only for information truly missing from the user requirement, and state how later agents should resolve or preserve it.
+Prefer a complete, implementation-ready contract over a brief high-level design.
+
 Return concise Markdown.
 """,
             ),
@@ -1298,10 +1338,17 @@ Required architecture coverage:
 - Open TBDs clearly listed.
 - Verification intent and acceptance criteria.
 
+Pass policy:
+- PASS when the contract is implementation-ready for the current user requirement.
+- PASS when optional categories are explicitly marked N/A with a reasonable reason.
+- PASS when TBDs are non-blocking or describe facts not present in the user requirement.
+- FAIL only for blocking gaps that prevent RTL coding, such as missing top/interface/reset/control/datapath decisions for an explicit requirement.
+- Do not fail merely because a generic category like backpressure, overflow, CDC, memory, or pipelining is N/A for this design.
+
 Return only raw JSON:
 {{
   "pass": true|false,
-  "report": "specific missing or weak architecture items to fix"
+  "report": "specific blocking missing or weak architecture items to fix; include non-blocking suggestions separately"
 }}
 """,
             ),
