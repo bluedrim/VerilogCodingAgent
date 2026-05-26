@@ -1791,7 +1791,8 @@ Control/Data Path plan:
 def verilog_coding_team_agent(state: AgentState):
     task = current_manager_task(state)
     task_id = sanitize_artifact_name(task.get("id"), "task")
-    print(f"---VERILOG CODING TEAM: Implementing {task['id']}---")
+    task_label = str(task.get("id") or task_id)
+    print(f"---VERILOG CODING TEAM: Implementing {task_label}---")
     feedback = ""
     if state.get("verification_report") and state.get("verification_retry_count", 0) > 0:
         feedback = f"\nFix the previous verification failures:\n{state['verification_report']}"
@@ -1824,7 +1825,7 @@ Rules:
 - Return only raw JSON, with no markdown fences or surrounding prose.
 - Preferred schema:
   [
-    {"filename": "module_name.sv", "content": "complete file content"}
+    {{"filename": "module_name.sv", "content": "complete file content"}}
   ]
 - Each content value must contain the complete file content.
 """,
@@ -1863,7 +1864,7 @@ Current RTL files:
             "architecture_contract": state.get("architecture_contract") or "(none)",
             "task": render_manager_task(task),
             "manager_handoff": current_manager_handoff(state),
-            "supervisor_plan": state["supervisor_plan"],
+            "supervisor_plan": state.get("supervisor_plan") or "(none)",
             "control_datapath_plan": state.get("control_datapath_plan") or "(none)",
             "rtl_context": clip_text(
                 state.get("rtl_context") or "(none)",
@@ -2238,7 +2239,7 @@ Rules:
 - Return only raw JSON, with no markdown fences or surrounding prose.
 - Preferred schema:
   [
-    {"filename": "tb_top.sv", "content": "complete testbench file content"}
+    {{"filename": "tb_top.sv", "content": "complete testbench file content"}}
   ]
 """,
             ),
