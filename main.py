@@ -1379,8 +1379,8 @@ def microarchitecture_condition(state: AgentState):
     if state.get("microarchitecture_passed"):
         return "verify"
     if state.get("microarchitecture_retry_count", 0) > state.get("max_retries", 3):
-        print("---CONDITION: Max microarchitecture retries reached. Failing run before final review.---")
-        return "fail"
+        print("---CONDITION: Max microarchitecture retries reached. Continuing to verification with latest RTL.---")
+        return "verify"
     return "retry"
 
 

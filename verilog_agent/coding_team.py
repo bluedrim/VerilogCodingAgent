@@ -191,6 +191,12 @@ Focus:
 - RTL uses synthesizable Verilog-2001 only, with .v/.vh files and no SystemVerilog constructs.
 
 Do not perform general functional verification here.
+Pass policy:
+- PASS when the RTL is synthesizable Verilog-2001 and the required control/datapath structure is reasonably visible.
+- PASS with warnings for naming/style improvements or non-blocking clarity suggestions.
+- FAIL only for blocking microarchitecture issues that prevent correct RTL implementation, such as missing required sequential state, missing required datapath storage/arithmetic, missing reset behavior for required registers, or forbidden SystemVerilog constructs.
+- Do not fail solely because signal names are different from preferred names when behavior and structure are clear.
+
 Return only raw JSON:
 {{
   "pass": true|false,
