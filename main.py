@@ -1025,6 +1025,38 @@ def normalize_generated_files(files: object) -> List[Dict[str, str]]:
     return normalized
 
 
+def recover_verilog_files_from_text(raw_content: str) -> List[Dict[str, str]]:
+    recovered = []
+    for idx, match in enumerate(
+        re.finditer(r"```(?:verilog|v)?\s*\n(.*?)\n?```", raw_content, flags=re.S | re.I)
+    ):
+        content = match.group(1).strip()
+        if re.search(r"\bmodule\b", content):
+            filename = _infer_filename_from_content(content, idx)
+            recovered.append({"filename": filename, "content": content})
+
+    if recovered:
+        return normalize_generated_files(recovered)
+
+    content = raw_content.strip()
+    if re.search(r"\bmodule\b", content) and re.search(r"\bendmodule\b", content):
+        return normalize_generated_files(
+            [{"filename": _infer_filename_from_content(content, 0), "content": content}]
+        )
+    raise ValueError("No recoverable Verilog module was found outside JSON.")
+
+
+def parse_generated_files_response(raw_content: str) -> List[Dict[str, str]]:
+    try:
+        files = _load_json(raw_content)
+        return normalize_generated_files(files)
+    except (json.JSONDecodeError, TypeError, ValueError) as json_exc:
+        try:
+            return recover_verilog_files_from_text(raw_content)
+        except ValueError as recover_exc:
+            raise ValueError(f"{json_exc}; fallback recovery failed: {recover_exc}") from json_exc
+
+
 def total_file_bytes(files: List[Dict[str, str]]) -> int:
     return sum(len(file_info["content"].encode()) for file_info in files)
 

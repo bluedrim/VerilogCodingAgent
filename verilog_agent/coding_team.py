@@ -117,8 +117,7 @@ Previous candidate RTL to revise, if any:
     )
 
     try:
-        files = _load_json(response.content)
-        files = normalize_generated_files(files)
+        files = parse_generated_files_response(response.content)
         is_valid, validation_error = validate_generated_files(
             files,
             state.get("max_generated_file_bytes", 500_000),
@@ -146,7 +145,10 @@ Previous candidate RTL to revise, if any:
             f"failed_attempts/{task_id}_invalid_json_attempt_{state.get('coding_retry_count', 0) + 1}.txt",
             response.content,
         )
-        report = f"Coding output format failed: {exc}. Regenerate valid JSON only."
+        report = (
+            f"Coding output format failed: {exc}. Regenerate valid JSON only, "
+            "or provide one fenced Verilog code block per file."
+        )
         return {
             "generation_ok": False,
             "microarchitecture_passed": False,

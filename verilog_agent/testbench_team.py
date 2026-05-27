@@ -81,8 +81,7 @@ Previous testbench files to revise, if any:
     )
 
     try:
-        files = _load_json(response.content)
-        files = normalize_generated_files(files)
+        files = parse_generated_files_response(response.content)
         is_valid, validation_error = validate_generated_files(
             files,
             state.get("max_generated_file_bytes", 500_000),
