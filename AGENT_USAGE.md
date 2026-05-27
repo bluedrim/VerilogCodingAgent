@@ -113,6 +113,7 @@ Edit these files to tune each agent without changing Python code.
 Current prompt files:
 
 - `prompts/manager.md`
+- `prompts/manager_json_repair.md`
 - `prompts/architecture.md`
 - `prompts/architecture_review.md`
 - `prompts/supervisor.md`

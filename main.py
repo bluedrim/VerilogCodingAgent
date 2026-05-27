@@ -813,6 +813,45 @@ def validate_plan(plan: object, max_tasks: int = 32):
     return True, ""
 
 
+def parse_manager_plan_response(raw_content: str, max_tasks: int = 32) -> List[Dict[str, object]]:
+    plan = _load_json(raw_content)
+    plan = _normalize_manager_plan_shape(plan)
+    is_valid, validation_error = validate_plan(plan, max_tasks)
+    if not is_valid:
+        raise ValueError(validation_error)
+    return plan
+
+
+def _normalize_manager_plan_shape(plan: object) -> List[Dict[str, object]]:
+    if isinstance(plan, dict):
+        for key in ("tasks", "plan", "manager_plan", "implementation_tasks"):
+            value = plan.get(key)
+            if isinstance(value, list):
+                plan = value
+                break
+    if not isinstance(plan, list):
+        raise ValueError("Manager plan must be a JSON list or an object containing a task list.")
+
+    normalized = []
+    for idx, item in enumerate(plan, start=1):
+        if not isinstance(item, dict):
+            raise ValueError(f"Task {idx - 1} must be an object.")
+        task = dict(item)
+        task.setdefault("id", f"T{idx}")
+        task.setdefault("title", f"Task {idx}")
+        if "goal" not in task:
+            task["goal"] = task.get("description") or task.get("objective") or task.get("summary") or ""
+        if "deliverable" not in task:
+            task["deliverable"] = task.get("output") or task.get("result") or ""
+        for key, value in list(task.items()):
+            if key in {"id", "title", "goal", "deliverable"}:
+                task[key] = "TBD" if value is None else str(value)
+            elif value is None:
+                task[key] = "TBD"
+        normalized.append(task)
+    return normalized
+
+
 def _stringify_task_field(value: object) -> str:
     if value is None:
         return "(not specified)"

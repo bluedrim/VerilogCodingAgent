@@ -52,12 +52,10 @@ def manager_agent(state: AgentState):
         ]
     )
     response = (prompt | llm).invoke({"user_request": state["user_request"]})
+    write_text_artifact("logs/manager_plan_raw_attempt_1.txt", response.content)
 
     try:
-        plan = _load_json(response.content)
-        is_valid, validation_error = validate_plan(plan, state.get("max_manager_tasks", 32))
-        if not is_valid:
-            raise ValueError(validation_error)
+        plan = parse_manager_plan_response(response.content, state.get("max_manager_tasks", 32))
         print(f"---MANAGER: Planned {len(plan)} tasks.---")
         write_json_artifact("manager_plan.json", plan)
         return {
@@ -68,6 +66,51 @@ def manager_agent(state: AgentState):
             "error_message": "",
         }
     except (json.JSONDecodeError, ValueError) as exc:
+        print(f"---WARNING: Manager produced invalid plan, attempting repair: {exc}---")
+        repair_prompt = ChatPromptTemplate.from_messages(
+            [
+                (
+                    "system",
+                    load_prompt("manager_json_repair.md"),
+                ),
+                (
+                    "human",
+                    """
+Original user requirement:
+{user_request}
+
+Invalid Manager output:
+{invalid_output}
+
+Parser error:
+{parser_error}
+""",
+                ),
+            ]
+        )
+        repair_response = (repair_prompt | llm).invoke(
+            {
+                "user_request": state["user_request"],
+                "invalid_output": response.content,
+                "parser_error": str(exc),
+            }
+        )
+        write_text_artifact("logs/manager_plan_repair_raw_attempt_1.txt", repair_response.content)
+        try:
+            plan = parse_manager_plan_response(
+                repair_response.content, state.get("max_manager_tasks", 32)
+            )
+            print(f"---MANAGER: Repaired plan with {len(plan)} tasks.---")
+            write_json_artifact("manager_plan.json", plan)
+            return {
+                "manager_plan": plan,
+                "current_task_index": 0,
+                "messages": [response, repair_response],
+                "manager_fallback_used": False,
+                "error_message": f"Manager plan repaired after invalid JSON: {exc}",
+            }
+        except (json.JSONDecodeError, ValueError) as repair_exc:
+            exc = repair_exc
         print(f"---ERROR: Manager produced invalid plan: {exc}---")
         if state.get("fail_on_manager_fallback"):
             report = f"Manager planning failed and fallback is disabled: {exc}"
