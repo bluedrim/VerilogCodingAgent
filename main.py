@@ -597,6 +597,10 @@ def _parse_review_json_result(result: object):
     result = {_normalize_review_key(key): value for key, value in result.items()}
     passed = _review_pass_value(result)
     report = _review_report_value(result)
+    if not passed and _review_report_is_nonblocking_pass(report):
+        passed = True
+    if passed and _review_report_has_blocking_failure(report):
+        passed = False
     return passed, report
 
 
@@ -664,8 +668,56 @@ def _review_report_value(result: Dict[str, object]) -> str:
     return json.dumps(result, ensure_ascii=False)
 
 
+def _review_report_is_nonblocking_pass(report: str) -> bool:
+    normalized = _normalize_review_text(report)
+    if not normalized:
+        return False
+    negative_context_patterns = (
+        r"\bnot\s+(?:complete\s+enough|implementation[-\s]?ready|sufficient|valid)\b",
+        r"\binsufficient\s+for\s+(?:rtl\s+)?(?:coding|implementation)\b",
+    )
+    if any(re.search(pattern, normalized) for pattern in negative_context_patterns):
+        return False
+    nonblocking_patterns = (
+        r"\bpass(?:ed)?\s+with\s+warnings?\b",
+        r"\bwarnings?\s+only\b",
+        r"\bno\s+blocking\s+(?:issues?|gaps?|problems?|findings?|failures?)\b",
+        r"\bno\s+blockers?\b",
+        r"\bno\s+required\s+(?:fixes?|changes?)\b",
+        r"\bnon[-\s]?blocking\s+(?:only|suggestions?|warnings?)\b",
+        r"\bcomplete\s+enough\b",
+        r"\bimplementation[-\s]?ready\b",
+        r"\bsufficient\s+for\s+(?:rtl\s+)?(?:coding|implementation)\b",
+    )
+    return any(re.search(pattern, normalized) for pattern in nonblocking_patterns)
+
+
+def _review_report_has_blocking_failure(report: str) -> bool:
+    normalized = _normalize_review_text(report)
+    if not normalized:
+        return False
+    if _review_report_is_nonblocking_pass(normalized):
+        return False
+    blocking_patterns = (
+        r"\bblocking\s+(?:issues?|gaps?|problems?|findings?|failures?)\b",
+        r"\bblockers?\s*:",
+        r"\bmust\s+(?:fix|change|add|define|specify|resolve)\b",
+        r"\brequired\s+(?:interface|reset|clock|datapath|control|fsm|state|width|module|signal)[^.\n;:]*\bmissing\b",
+        r"\bmissing\s+required\s+(?:interface|reset|clock|datapath|control|fsm|state|width|module|signal)\b",
+        r"\bnot\s+(?:complete|implementation[-\s]?ready|sufficient|valid)\b",
+        r"\bdoes\s+not\s+(?:satisfy|meet|match|compile|pass)\b",
+        r"\bsyntax\s+(?:error|fail|failed)\b",
+        r"\b(?:verilog|rtl)\s+(?:error|invalid)\b",
+    )
+    return any(re.search(pattern, normalized) for pattern in blocking_patterns)
+
+
 def _parse_review_text_verdict(raw_content: str) -> Optional[bool]:
-    lowered = raw_content.strip().lower()
+    lowered = _normalize_review_text(raw_content)
+    if _review_report_is_nonblocking_pass(lowered):
+        return True
+    if _review_report_has_blocking_failure(lowered):
+        return False
     if re.search(r"\b(no|without)\s+(failures?|errors?|issues?|blocking\s+issues?)\b", lowered):
         return True
     if re.search(r"\b(fail|failed|reject|rejected|invalid|not\s+pass|does\s+not\s+pass)\b", lowered):
@@ -682,6 +734,12 @@ def _compact_review_text(raw_content: str, limit: int = 2000) -> str:
     if len(compact) <= limit:
         return compact
     return compact[:limit] + "\n... [truncated]"
+
+
+def _normalize_review_text(value: object) -> str:
+    text = str(value or "").strip().lower()
+    text = re.sub(r"[ \t]+", " ", text)
+    return text
 
 
 def _json_bool(value: object) -> bool:

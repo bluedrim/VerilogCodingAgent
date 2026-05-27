@@ -13,6 +13,12 @@ Check:
 - Whether datapath width choices, overflow/underflow behavior, and reset values are sensible.
 - Whether the current task is satisfied without breaking previous RTL context.
 
+Pass policy:
+- PASS when the candidate RTL is synthesizable Verilog-2001 and satisfies the current task at review depth.
+- PASS with warnings for style, naming, comments, or test coverage suggestions that do not indicate a functional or synthesis bug.
+- FAIL only for blocking issues such as syntax/lint failure, forbidden SystemVerilog, module/interface mismatch, missing required reset/control/datapath behavior, or clear functional mismatch with the user requirement.
+- Do not fail merely because deeper simulation, more tests, or optional refinements would be useful.
+
 Return only raw JSON with:
 {{
   "pass": true|false,

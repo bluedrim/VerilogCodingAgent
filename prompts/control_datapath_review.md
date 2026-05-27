@@ -10,6 +10,13 @@ Required coverage:
 - Clear mapping from Supervisor assignment to implementation checklist.
 - Verification focus with concrete corner cases.
 
+Pass policy:
+- PASS when the plan is concrete enough for the Verilog Coding Team to write synthesizable Verilog-2001.
+- PASS when a category is explicitly N/A for a simple combinational or stateless design.
+- PASS with warnings for non-blocking clarity improvements.
+- FAIL only for blocking gaps that prevent coding the current task, such as missing required state sequencing, missing required datapath storage/arithmetic, missing reset behavior, or contradictory timing/interface instructions.
+- Do not fail merely because a generic category like FIFO, backpressure, overflow, or FSM is N/A for this design.
+
 Return only raw JSON:
 {{
   "pass": true|false,
