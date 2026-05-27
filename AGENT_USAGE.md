@@ -105,6 +105,25 @@ Options:
 - `--llm-api-url`: OpenAI-compatible chat completions URL.
 - `--llm-api-key`: API key for OpenAI or the remote endpoint. The saved config redacts it.
 
+## Agent prompts
+
+Team system prompts are stored as Markdown files under `prompts/`.
+Edit these files to tune each agent without changing Python code.
+
+Current prompt files:
+
+- `prompts/manager.md`
+- `prompts/architecture.md`
+- `prompts/architecture_review.md`
+- `prompts/supervisor.md`
+- `prompts/supervisor_review.md`
+- `prompts/control_datapath_planner.md`
+- `prompts/control_datapath_review.md`
+- `prompts/verilog_coding.md`
+- `prompts/microarchitecture_review.md`
+- `prompts/verification.md`
+- `prompts/testbench.md`
+
 ## Outputs
 
 Generated files are written under `generated_rtl/`.

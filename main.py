@@ -388,6 +388,7 @@ llm = None
 active_llm_config = llm_config()
 writer_tools = [write_verilog_file]
 ARTIFACT_DIR = Path(os.getenv("ARTIFACT_DIR", "generated_rtl"))
+PROMPT_DIR = Path(__file__).resolve().parent / "prompts"
 
 
 PROJECT_KEYWORD_STOPWORDS = {
@@ -417,6 +418,14 @@ def sanitize_artifact_name(value: object, fallback: str = "item") -> str:
     text = str(value or "").strip()
     text = re.sub(r"[^a-zA-Z0-9_.-]+", "_", text).strip("._")
     return text or fallback
+
+
+def load_prompt(filename: str) -> str:
+    prompt_path = PROMPT_DIR / filename
+    try:
+        return prompt_path.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        raise FileNotFoundError(f"Prompt file not found: {prompt_path}") from exc
 
 
 def derive_project_keyword(requirement: str, fallback: str = "verilog_project") -> str:

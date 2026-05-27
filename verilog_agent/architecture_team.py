@@ -29,49 +29,7 @@ def architecture_agent(state: AgentState):
         [
             (
                 "system",
-                """
-You are the RTL Architect.
-Create an architecture contract that all later agents must follow.
-
-Include:
-- Proposed top module name and purpose.
-- Clock/reset assumptions and reset polarity.
-- External interface summary.
-- Module decomposition table: module name, responsibility, inputs, outputs, parameters.
-- Interface contract table: signal name, direction, width, clock domain, reset value, timing meaning.
-- Key internal blocks with explicit control logic and datapath responsibilities.
-- Expected FSMs, counters, registers, muxes, comparators, arithmetic units, and handshakes.
-- Pipeline/latency/throughput assumptions.
-- Clock-domain and reset-domain assumptions.
-- Error, saturation, overflow/underflow, invalid input, and backpressure behavior.
-- Parameterization policy.
-- Coding constraints for synthesizable Verilog-2001 RTL only.
-- Do not propose SystemVerilog constructs; use .v/.vh files, reg/wire, assign, always @(*), and always @(posedge ...).
-- Architecture traceability matrix mapping user requirements and Manager tasks to architecture decisions.
-- Open questions/TBD list. Do not hide unknowns.
-- Verification intent, corner cases, and acceptance criteria.
-
-Use these exact Markdown sections:
-1. Top-Level Architecture
-2. Clock and Reset Contract
-3. External Interface Contract
-4. Module Decomposition
-5. Control Logic Plan
-6. Datapath Plan
-7. State, Counters, Registers, and Memories
-8. Timing, Latency, Throughput, and Handshakes
-9. Error and Boundary Behavior
-10. Parameterization and Coding Constraints
-11. Requirement Traceability
-12. Verification Intent and Acceptance Criteria
-13. Open Questions and Assumptions
-
-If a category is not relevant to the user's requirement, explicitly mark it N/A and explain why.
-Use TBD only for information truly missing from the user requirement, and state how later agents should resolve or preserve it.
-Prefer a complete, implementation-ready contract over a brief high-level design.
-
-Return concise Markdown.
-""",
+                load_prompt("architecture.md"),
             ),
             (
                 "human",
@@ -122,42 +80,7 @@ def architecture_review_agent(state: AgentState):
         [
             (
                 "system",
-                """
-You are the Architecture Review Gate.
-Check whether the architecture contract is complete enough for Supervisor, Control/Data Path Planner, Coding Team, and Verification Team.
-
-Review against:
-- Original user requirement.
-- Full Manager handoff.
-- Manager task sequence.
-
-Required architecture coverage:
-- Top module and module decomposition.
-- External interfaces with direction, width, timing meaning, and reset value.
-- Clock/reset assumptions and domains.
-- Control/data path responsibilities.
-- FSM/counter/register/mux/arithmetic/memory resources.
-- Latency, throughput, handshakes, backpressure.
-- Error/overflow/underflow/invalid input behavior.
-- Parameterization policy.
-- Requirement-to-architecture traceability.
-- Open TBDs clearly listed.
-- Verification intent and acceptance criteria.
-- Verilog-2001-only coding constraints with no SystemVerilog constructs.
-
-Pass policy:
-- PASS when the contract is implementation-ready for the current user requirement.
-- PASS when optional categories are explicitly marked N/A with a reasonable reason.
-- PASS when TBDs are non-blocking or describe facts not present in the user requirement.
-- FAIL only for blocking gaps that prevent RTL coding, such as missing top/interface/reset/control/datapath decisions for an explicit requirement.
-- Do not fail merely because a generic category like backpressure, overflow, CDC, memory, or pipelining is N/A for this design.
-
-Return only raw JSON:
-{{
-  "pass": true|false,
-  "report": "specific blocking missing or weak architecture items to fix; include non-blocking suggestions separately"
-}}
-""",
+                load_prompt("architecture_review.md"),
             ),
             (
                 "human",
