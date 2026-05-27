@@ -1082,7 +1082,11 @@ def _strip_markdown_code_fence(content: str) -> str:
 
 
 def _infer_filename_from_content(content: str, index: int) -> str:
-    match = re.search(r"\b(?:module|primitive)\s+([a-zA-Z_][a-zA-Z0-9_$]*)\b", content)
+    match = re.search(
+        r"^\s*(?:module|primitive)\s+([a-zA-Z_][a-zA-Z0-9_$]*)\b",
+        content,
+        flags=re.M,
+    )
     if match:
         return f"{match.group(1)}.v"
     return f"generated_{index + 1}.v"
@@ -1131,24 +1135,93 @@ def normalize_generated_files(files: object) -> List[Dict[str, str]]:
     return normalized
 
 
+def _extract_filename_hint(text: str, index: int) -> str:
+    patterns = (
+        r"(?:filename|file_name|file|path)\s*[:=]\s*[`'\"]?([a-zA-Z0-9_.-]+\.(?:v|vh|sv|svh))",
+        r"^\s*#+\s*`?([a-zA-Z0-9_.-]+\.(?:v|vh|sv|svh))`?\s*$",
+        r"^\s*//\s*([a-zA-Z0-9_.-]+\.(?:v|vh|sv|svh))\s*$",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.I | re.M)
+        if match:
+            return _normalize_filename(match.group(1), "", index)
+    return ""
+
+
+def _verilog_module_blocks(content: str) -> List[str]:
+    blocks = []
+    pattern = re.compile(
+        r"^\s*(?:module|primitive)\s+[a-zA-Z_][a-zA-Z0-9_$]*\b.*?"
+        r"^\s*end(?:module|primitive)\b",
+        flags=re.S | re.M,
+    )
+    for match in pattern.finditer(content):
+        blocks.append(match.group(0).strip())
+    return blocks
+
+
+def _append_recovered_file(
+    recovered: List[Dict[str, str]], filename: str, content: str, index: int
+) -> None:
+    content = content.strip()
+    if not content:
+        return
+    stripped = strip_hdl_comments(content)
+    if not re.search(r"^\s*(?:module|primitive)\b", stripped, flags=re.M):
+        return
+    if not re.search(r"^\s*end(?:module|primitive)\b", stripped, flags=re.M):
+        return
+    recovered.append(
+        {
+            "filename": filename or _infer_filename_from_content(content, index),
+            "content": content,
+        }
+    )
+
+
 def recover_verilog_files_from_text(raw_content: str) -> List[Dict[str, str]]:
     recovered = []
-    for idx, match in enumerate(
-        re.finditer(r"```(?:verilog|v)?\s*\n(.*?)\n?```", raw_content, flags=re.S | re.I)
-    ):
-        content = match.group(1).strip()
-        if re.search(r"\bmodule\b", content):
-            filename = _infer_filename_from_content(content, idx)
-            recovered.append({"filename": filename, "content": content})
+    fence_pattern = re.compile(r"```([^\n`]*)\n(.*?)\n?```", flags=re.S | re.I)
+    for idx, match in enumerate(fence_pattern.finditer(raw_content)):
+        fence_info = match.group(1).strip()
+        content = match.group(2).strip()
+        if not re.search(r"^\s*(?:module|primitive)\b", content, flags=re.M):
+            continue
+        prefix = raw_content[max(0, match.start() - 300) : match.start()]
+        filename = _extract_filename_hint(f"{prefix}\n{fence_info}", idx)
+        blocks = _verilog_module_blocks(content)
+        if len(blocks) > 1 and not filename:
+            for block in blocks:
+                _append_recovered_file(recovered, "", block, len(recovered))
+        else:
+            _append_recovered_file(
+                recovered,
+                filename or _infer_filename_from_content(content, idx),
+                content,
+                idx,
+            )
 
     if recovered:
         return normalize_generated_files(recovered)
 
     content = raw_content.strip()
-    if re.search(r"\bmodule\b", content) and re.search(r"\bendmodule\b", content):
-        return normalize_generated_files(
-            [{"filename": _infer_filename_from_content(content, 0), "content": content}]
+    blocks = _verilog_module_blocks(content)
+    for block in blocks:
+        _append_recovered_file(recovered, "", block, len(recovered))
+    if recovered:
+        return normalize_generated_files(recovered)
+
+    if re.search(r"^\s*(?:module|primitive)\b", content, flags=re.M) and re.search(
+        r"^\s*end(?:module|primitive)\b", content, flags=re.M
+    ):
+        _append_recovered_file(
+            recovered,
+            _infer_filename_from_content(content, 0),
+            content,
+            0,
         )
+        if recovered:
+            return normalize_generated_files(recovered)
     raise ValueError("No recoverable Verilog module was found outside JSON.")
 
 

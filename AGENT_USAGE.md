@@ -121,6 +121,7 @@ Current prompt files:
 - `prompts/control_datapath_planner.md`
 - `prompts/control_datapath_review.md`
 - `prompts/verilog_coding.md`
+- `prompts/verilog_coding_repair.md`
 - `prompts/microarchitecture_review.md`
 - `prompts/verification.md`
 - `prompts/testbench.md`

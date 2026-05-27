@@ -115,6 +115,68 @@ Previous candidate RTL to revise, if any:
             "error_message": "",
         }
     except (json.JSONDecodeError, TypeError, ValueError) as exc:
+        print(f"---WARNING: Coding team output was invalid, attempting repair: {exc}---")
+        repair_prompt = ChatPromptTemplate.from_messages(
+            [
+                (
+                    "system",
+                    load_prompt("verilog_coding_repair.md"),
+                ),
+                (
+                    "human",
+                    """
+Current Manager task:
+{task}
+
+Supervisor detailed assignment:
+{supervisor_plan}
+
+Invalid coding output:
+{invalid_output}
+
+Parser or validation error:
+{parser_error}
+""",
+                ),
+            ]
+        )
+        repair_response = (repair_prompt | llm).invoke(
+            {
+                "task": render_manager_task(task),
+                "supervisor_plan": state.get("supervisor_plan") or "(none)",
+                "invalid_output": response.content,
+                "parser_error": str(exc),
+            }
+        )
+        write_text_artifact(
+            f"logs/{task_id}_coding_repair_raw_attempt_{state.get('coding_retry_count', 0) + 1}.txt",
+            repair_response.content,
+        )
+        try:
+            files = parse_generated_files_response(repair_response.content)
+            is_valid, validation_error = validate_generated_files(
+                files,
+                state.get("max_generated_file_bytes", 500_000),
+                state.get("max_generated_files", 64),
+            )
+            if not is_valid:
+                raise ValueError(validation_error)
+            print(f"---VERILOG CODING TEAM: Repaired {len(files)} candidate files.---")
+            write_json_artifact(
+                f"logs/{task_id}_coding_attempt_{state.get('coding_retry_count', 0) + 1}.json",
+                files,
+            )
+            return {
+                "candidate_files": files,
+                "generation_ok": True,
+                "microarchitecture_passed": False,
+                "messages": [response, repair_response],
+                "failed_stage": "",
+                "blocking_report": "",
+                "error_message": f"Coding output repaired after invalid format: {exc}",
+            }
+        except (json.JSONDecodeError, TypeError, ValueError) as repair_exc:
+            exc = repair_exc
         print(f"---ERROR: Coding team produced invalid JSON: {exc}---")
         write_text_artifact(
             f"failed_attempts/{task_id}_invalid_json_attempt_{state.get('coding_retry_count', 0) + 1}.txt",
