@@ -1197,7 +1197,7 @@ def write_json_artifact(relative_path: str, content: object):
 def extract_module_names(files: List[Dict[str, str]]) -> List[str]:
     names = []
     for file_info in files:
-        content = re.sub(r"//.*?$|/\*.*?\*/", "", file_info["content"], flags=re.S | re.M)
+        content = strip_hdl_comments(file_info["content"])
         for match in re.finditer(r"\bmodule\s+([a-zA-Z_][a-zA-Z0-9_$]*)\b", content):
             name = match.group(1)
             if name not in names:
@@ -1220,7 +1220,7 @@ def infer_top_module_candidates(files: List[Dict[str, str]]) -> List[str]:
 def extract_module_name_counts(files: List[Dict[str, str]]) -> Dict[str, int]:
     counts: Dict[str, int] = {}
     for file_info in files:
-        content = re.sub(r"//.*?$|/\*.*?\*/", "", file_info["content"], flags=re.S | re.M)
+        content = strip_hdl_comments(file_info["content"])
         for match in re.finditer(r"\bmodule\s+([a-zA-Z_][a-zA-Z0-9_$]*)\b", content):
             name = match.group(1)
             counts[name] = counts.get(name, 0) + 1
@@ -1269,7 +1269,7 @@ def extract_instantiated_modules(files: List[Dict[str, str]]) -> List[str]:
         flags=re.M | re.S,
     )
     for file_info in files:
-        content = re.sub(r"//.*?$|/\*.*?\*/", "", file_info["content"], flags=re.S | re.M)
+        content = strip_hdl_comments(file_info["content"])
         for module_name, _instance_name in pattern.findall(content):
             if module_name not in primitive_or_keyword and module_name not in instances:
                 instances.append(module_name)
@@ -1319,15 +1319,16 @@ def basic_rtl_sanity(
     for file_info in files:
         filename = file_info["filename"]
         content = file_info["content"]
+        stripped_content = strip_hdl_comments(content)
         if any(marker in content for marker in ("<<<<<<<", "=======", ">>>>>>>")):
             issues.append(f"{filename}: unresolved conflict marker found")
-        module_count = len(re.findall(r"\bmodule\b", content))
-        endmodule_count = len(re.findall(r"\bendmodule\b", content))
+        module_count = len(re.findall(r"\bmodule\b", stripped_content))
+        endmodule_count = len(re.findall(r"\bendmodule\b", stripped_content))
         if module_count != endmodule_count:
             issues.append(
                 f"{filename}: module/endmodule count mismatch ({module_count}/{endmodule_count})"
             )
-        if re.search(r"\bassign\s+[^;]+(?=\n)", content):
+        if re.search(r"\bassign\s+[^;]+(?=\n)", stripped_content):
             issues.append(f"{filename}: possible assign statement missing semicolon")
 
     for instance_module in extract_instantiated_modules(files):
@@ -1340,10 +1341,10 @@ def basic_rtl_sanity(
 
 
 def static_microarchitecture_review(files: List[Dict[str, str]]) -> Dict[str, object]:
-    combined = "\n".join(file_info["content"] for file_info in files)
+    combined = "\n".join(strip_hdl_comments(file_info["content"]) for file_info in files)
     blockers = []
     warnings = []
-    sv_error = find_systemverilog_construct(strip_hdl_comments(combined))
+    sv_error = find_systemverilog_construct(combined)
     if sv_error:
         blockers.append(f"SystemVerilog construct is not allowed: {sv_error}")
     sequential_blocks = len(re.findall(r"always\s*@\s*\(", combined))
