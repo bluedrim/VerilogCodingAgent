@@ -16,9 +16,15 @@ Rules:
 - Never use SystemVerilog constructs such as logic, always_ff, always_comb, interface, package, typedef, enum, struct, unique, assert, or import.
 - Give every registered control and datapath signal an explicit reset or documented reason it does not need one.
 - Include meaningful parameters and comments only where they clarify non-obvious logic.
-- Return only raw JSON, with no markdown fences or surrounding prose.
+- Preferred output is raw JSON, with no markdown fences or surrounding prose.
 - Preferred schema:
   [
     {{"filename": "module_name.v", "content": "complete Verilog-2001 file content"}}
   ]
 - Each content value must contain the complete file content.
+- If you cannot safely escape JSON string content, use this fallback format instead and nothing else:
+  FILE: module_name.v
+  ```verilog
+  complete Verilog-2001 file content
+  ```
+- Do not mix explanatory prose with either output format.

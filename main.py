@@ -1150,13 +1150,23 @@ def _extract_filename_hint(text: str, index: int) -> str:
 
 def _verilog_module_blocks(content: str) -> List[str]:
     blocks = []
-    pattern = re.compile(
+    strict_pattern = re.compile(
         r"^\s*(?:module|primitive)\s+[a-zA-Z_][a-zA-Z0-9_$]*\b.*?"
         r"^\s*end(?:module|primitive)\b",
         flags=re.S | re.M,
     )
-    for match in pattern.finditer(content):
+    for match in strict_pattern.finditer(content):
         blocks.append(match.group(0).strip())
+    if blocks:
+        return blocks
+
+    loose_pattern = re.compile(
+        r"\b(?:module|primitive)\s+[a-zA-Z_][a-zA-Z0-9_$]*\b.*?"
+        r"\bend(?:module|primitive)\b",
+        flags=re.S,
+    )
+    for match in loose_pattern.finditer(content):
+        blocks.append(match.group(0).strip().strip('"`'))
     return blocks
 
 
@@ -1167,9 +1177,9 @@ def _append_recovered_file(
     if not content:
         return
     stripped = strip_hdl_comments(content)
-    if not re.search(r"^\s*(?:module|primitive)\b", stripped, flags=re.M):
+    if not re.search(r"\b(?:module|primitive)\b", stripped):
         return
-    if not re.search(r"^\s*end(?:module|primitive)\b", stripped, flags=re.M):
+    if not re.search(r"\bend(?:module|primitive)\b", stripped):
         return
     recovered.append(
         {
