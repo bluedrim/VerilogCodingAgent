@@ -41,6 +41,7 @@ def final_review_agent(state: AgentState):
 @_with_runtime
 def summary_agent(state: AgentState):
     print("---SUMMARY: Writing Run Summary---")
+    writer_errors = collect_writer_errors(state)
     failed_stage = state.get("failed_stage", "")
     run_status = state.get("run_status", "")
     if not run_status:
@@ -50,8 +51,12 @@ def summary_agent(state: AgentState):
             run_status = "failed"
         else:
             run_status = "not_written"
+    if writer_errors:
+        failed_stage = failed_stage or "writer"
+        run_status = "failed"
     blocking_report = (
-        state.get("blocking_report")
+        "\n".join(writer_errors)
+        or state.get("blocking_report")
         or state.get("verification_report")
         or state.get("final_lint_report")
         or ""
@@ -61,6 +66,7 @@ def summary_agent(state: AgentState):
         "run_status": run_status,
         "failed_stage": failed_stage,
         "blocking_report": blocking_report,
+        "writer_errors": writer_errors,
         "review_feedback_log": state.get("review_feedback_log", []),
         "artifact_dir": str(ARTIFACT_DIR),
         "llm_config": active_llm_config,
@@ -127,6 +133,18 @@ def summary_agent(state: AgentState):
     write_json_artifact("file_manifest.json", build_file_manifest(all_files))
     write_json_artifact("run_summary.json", summary)
     return {}
+
+
+@_with_runtime
+def collect_writer_errors(state: AgentState):
+    errors = []
+    for message in state.get("messages", []):
+        if not isinstance(message, ToolMessage):
+            continue
+        content = str(getattr(message, "content", "") or "").strip()
+        if content.lower().startswith("error"):
+            errors.append(content)
+    return errors
 
 
 @_with_runtime
