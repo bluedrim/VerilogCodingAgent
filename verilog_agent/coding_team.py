@@ -93,13 +93,28 @@ Previous candidate RTL to revise, if any:
 
     try:
         files = parse_generated_files_response(response.content)
+    except (json.JSONDecodeError, TypeError, ValueError) as exc:
+        files = []
+        initial_error_kind = "parse"
+        initial_error = exc
+    else:
         is_valid, validation_error = validate_generated_files(
             files,
             state.get("max_generated_file_bytes", 500_000),
             state.get("max_generated_files", 64),
         )
         if not is_valid:
-            raise ValueError(validation_error)
+            initial_error_kind = "validation"
+            initial_error = ValueError(validation_error)
+            write_json_artifact(
+                f"failed_attempts/{task_id}_parsed_but_invalid_attempt_{state.get('coding_retry_count', 0) + 1}.json",
+                files,
+            )
+        else:
+            initial_error_kind = ""
+            initial_error = None
+
+    if initial_error is None:
         print(f"---VERILOG CODING TEAM: Generated {len(files)} candidate files.---")
         write_json_artifact(
             f"logs/{task_id}_coding_attempt_{state.get('coding_retry_count', 0) + 1}.json",
@@ -114,8 +129,10 @@ Previous candidate RTL to revise, if any:
             "blocking_report": "",
             "error_message": "",
         }
-    except (json.JSONDecodeError, TypeError, ValueError) as exc:
-        print(f"---WARNING: Coding team output was invalid, attempting repair: {exc}---")
+
+    exc = initial_error
+    print(f"---WARNING: Coding team output failed {initial_error_kind}, attempting repair: {exc}---")
+    try:
         repair_prompt = ChatPromptTemplate.from_messages(
             [
                 (
@@ -177,27 +194,34 @@ Parser or validation error:
             }
         except (json.JSONDecodeError, TypeError, ValueError) as repair_exc:
             exc = repair_exc
-        print(f"---ERROR: Coding team produced invalid JSON: {exc}---")
-        write_text_artifact(
-            f"failed_attempts/{task_id}_invalid_json_attempt_{state.get('coding_retry_count', 0) + 1}.txt",
-            response.content,
-        )
-        report = (
-            f"Coding output format failed: {exc}. Regenerate valid JSON only, "
-            "or provide one fenced Verilog code block per file."
-        )
-        return {
-            "generation_ok": False,
-            "microarchitecture_passed": False,
-            "verification_passed": False,
-            "verification_report": report,
-            "coding_retry_count": state.get("coding_retry_count", 0) + 1,
-            "failed_stage": "coding",
-            "blocking_report": report,
-            "messages": [response],
-            "error_message": str(exc),
-            "review_feedback_log": append_review_feedback(state, "coding_format", report, task_id),
-        }
+            write_text_artifact(
+                f"failed_attempts/{task_id}_repair_failed_attempt_{state.get('coding_retry_count', 0) + 1}.txt",
+                repair_response.content,
+            )
+    except Exception as repair_runtime_exc:
+        exc = repair_runtime_exc
+
+    print(f"---ERROR: Coding team produced invalid file output: {exc}---")
+    write_text_artifact(
+        f"failed_attempts/{task_id}_invalid_coding_output_attempt_{state.get('coding_retry_count', 0) + 1}.txt",
+        response.content,
+    )
+    report = (
+        f"Coding output {initial_error_kind} failed: {exc}. Regenerate using FILE blocks "
+        "with one complete synthesizable Verilog-2001 .v/.vh file per block."
+    )
+    return {
+        "generation_ok": False,
+        "microarchitecture_passed": False,
+        "verification_passed": False,
+        "verification_report": report,
+        "coding_retry_count": state.get("coding_retry_count", 0) + 1,
+        "failed_stage": "coding",
+        "blocking_report": report,
+        "messages": [response],
+        "error_message": str(exc),
+        "review_feedback_log": append_review_feedback(state, "coding_format", report, task_id),
+    }
 
 
 @_with_runtime
