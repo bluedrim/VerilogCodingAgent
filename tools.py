@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 from langchain_core.tools import tool
 
 @tool
@@ -26,16 +27,16 @@ def write_verilog_file(filename: str, content: str) -> str:
         if raw_filename != safe_filename:
             return f"Error writing to file: path segments are not allowed ({filename})"
 
-        allowed_exts = {".v", ".sv", ".vh", ".svh"}
+        allowed_exts = {".v", ".vh"}
         _, ext = os.path.splitext(safe_filename)
         if ext.lower() not in allowed_exts:
             return f"Error writing to file: unsupported extension '{ext}'"
 
-        output_dir = "generated_rtl"
-        os.makedirs(output_dir, exist_ok=True)
-        output_path = os.path.join(output_dir, safe_filename)
+        output_dir = Path(os.getenv("ARTIFACT_DIR", "generated_rtl"))
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = output_dir / safe_filename
 
-        with open(output_path, "w") as f:
+        with open(output_path, "w", encoding="utf-8") as f:
             f.write(content)
         return f"Successfully wrote Verilog code to {output_path}"
     except Exception as e:

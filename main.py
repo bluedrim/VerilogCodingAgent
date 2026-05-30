@@ -1784,6 +1784,7 @@ if __name__ == "__main__":
 
     run_timestamp = datetime.now()
     ARTIFACT_DIR = resolve_artifact_dir(args, initial_user_request, run_timestamp)
+    os.environ["ARTIFACT_DIR"] = str(ARTIFACT_DIR)
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     llm = create_llm(
         args.llm_provider,
