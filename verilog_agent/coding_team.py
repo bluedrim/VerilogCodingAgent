@@ -98,7 +98,7 @@ Previous candidate RTL to revise, if any:
         initial_error_kind = "parse"
         initial_error = exc
     else:
-        is_valid, validation_error = validate_generated_files(
+        is_valid, validation_error = validate_coding_candidate_files(
             files,
             state.get("max_generated_file_bytes", 500_000),
             state.get("max_generated_files", 64),
@@ -109,6 +109,10 @@ Previous candidate RTL to revise, if any:
             write_json_artifact(
                 f"failed_attempts/{task_id}_parsed_but_invalid_attempt_{state.get('coding_retry_count', 0) + 1}.json",
                 files,
+            )
+            write_text_artifact(
+                f"failed_attempts/{task_id}_parsed_but_invalid_attempt_{state.get('coding_retry_count', 0) + 1}.files.txt",
+                render_file_blocks(files),
             )
         else:
             initial_error_kind = ""
@@ -171,12 +175,20 @@ Parser or validation error:
         )
         try:
             files = parse_generated_files_response(repair_response.content)
-            is_valid, validation_error = validate_generated_files(
+            is_valid, validation_error = validate_coding_candidate_files(
                 files,
                 state.get("max_generated_file_bytes", 500_000),
                 state.get("max_generated_files", 64),
             )
             if not is_valid:
+                write_json_artifact(
+                    f"failed_attempts/{task_id}_repair_parsed_but_invalid_attempt_{state.get('coding_retry_count', 0) + 1}.json",
+                    files,
+                )
+                write_text_artifact(
+                    f"failed_attempts/{task_id}_repair_parsed_but_invalid_attempt_{state.get('coding_retry_count', 0) + 1}.files.txt",
+                    render_file_blocks(files),
+                )
                 raise ValueError(validation_error)
             print(f"---VERILOG CODING TEAM: Repaired {len(files)} candidate files.---")
             write_json_artifact(

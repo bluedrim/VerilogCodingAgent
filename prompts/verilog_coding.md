@@ -16,6 +16,8 @@ Rules:
 - Never use SystemVerilog constructs such as logic, always_ff, always_comb, interface, package, typedef, enum, struct, unique, assert, or import.
 - Give every registered control and datapath signal an explicit reset or documented reason it does not need one.
 - Include meaningful parameters and comments only where they clarify non-obvious logic.
+- Before returning, self-check that every .v file has balanced module/endmodule or primitive/endprimitive pairs.
+- Before returning, self-check that every assign statement and declaration ends with a semicolon.
 - Preferred output is this FILE block format, repeated once per file:
   FILE: module_name.v
   ```verilog

@@ -128,31 +128,34 @@ Current prompt files:
 
 ## Outputs
 
-Generated files are written under `generated_rtl/`.
+Generated files are written under the artifact directory. By default this is
+`output_<project_keyword>_<YYYYMMDD>_<HHMMSS>`; use `--artifact-dir` to choose
+a fixed path such as `generated_rtl`.
 
 Important artifacts:
 
-- `generated_rtl/user_requirement.txt`
-- `generated_rtl/llm_config.json`
-- `generated_rtl/execution_config.json`
-- `generated_rtl/manager_plan.json`
-- `generated_rtl/architecture_contract.md`
-- `generated_rtl/logs/architecture_review_attempt_*.md`
-- `generated_rtl/logs/*_supervisor_review_attempt_*.md`
-- `generated_rtl/logs/*_control_datapath_plan.md`
-- `generated_rtl/logs/*_control_datapath_review_attempt_*.md`
-- `generated_rtl/logs/*_microarchitecture_review_attempt_*.md`
-- `generated_rtl/compile_order.f`
-- `generated_rtl/file_manifest.json`
-- `generated_rtl/run_summary.json`
-- `generated_rtl/logs/`
-- `generated_rtl/failed_attempts/`
+- `<artifact-dir>/user_requirement.txt`
+- `<artifact-dir>/llm_config.json`
+- `<artifact-dir>/execution_config.json`
+- `<artifact-dir>/manager_plan.json`
+- `<artifact-dir>/architecture_contract.md`
+- `<artifact-dir>/logs/architecture_review_attempt_*.md`
+- `<artifact-dir>/logs/*_supervisor_review_attempt_*.md`
+- `<artifact-dir>/logs/*_control_datapath_plan.md`
+- `<artifact-dir>/logs/*_control_datapath_review_attempt_*.md`
+- `<artifact-dir>/logs/*_coding_attempt_*.json`
+- `<artifact-dir>/logs/*_microarchitecture_review_attempt_*.md`
+- `<artifact-dir>/compile_order.f`
+- `<artifact-dir>/file_manifest.json`
+- `<artifact-dir>/run_summary.json`
+- `<artifact-dir>/logs/`
+- `<artifact-dir>/failed_attempts/`
 
 If `verilator` or `iverilog` is installed, syntax lint runs automatically. If neither
 tool is available, lint is skipped and the skip is recorded in the logs. Use
 `--require-lint` when lint tool availability should be a blocking quality gate.
 
-`generated_rtl/run_summary.json` includes `run_id`, `run_status`, `failed_stage`,
+`<artifact-dir>/run_summary.json` includes `run_id`, `run_status`, `failed_stage`,
 `blocking_report`, artifact directory, lint policy, blackbox policy, generated
 file count and size limits, prompt context limit, user request limit, Manager
 task limit, Manager fallback status, task progress, retry limits, final lint

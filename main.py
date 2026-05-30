@@ -1246,6 +1246,32 @@ def parse_generated_files_response(raw_content: str) -> List[Dict[str, str]]:
             raise ValueError(f"{json_exc}; fallback recovery failed: {recover_exc}") from json_exc
 
 
+def render_file_blocks(files: List[Dict[str, str]]) -> str:
+    blocks = []
+    for file_info in files:
+        blocks.append(
+            f"FILE: {file_info['filename']}\n"
+            "```verilog\n"
+            f"{file_info['content'].rstrip()}\n"
+            "```"
+        )
+    return "\n\n".join(blocks)
+
+
+def validate_coding_candidate_files(
+    files: object,
+    max_file_bytes: int = 500_000,
+    max_files: int = 64,
+):
+    is_valid, validation_error = validate_generated_files(files, max_file_bytes, max_files)
+    if not is_valid:
+        return False, validation_error
+    sanity_result = basic_rtl_sanity(files, allow_blackboxes=True)
+    if not sanity_result["passed"]:
+        return False, f"Basic Verilog sanity failed:\n{sanity_result['report']}"
+    return True, ""
+
+
 def total_file_bytes(files: List[Dict[str, str]]) -> int:
     return sum(len(file_info["content"].encode()) for file_info in files)
 
