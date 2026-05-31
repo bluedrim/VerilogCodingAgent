@@ -19,7 +19,7 @@ def verilog_coding_team_agent(state: AgentState):
     task_label = str(task.get("id") or task_id)
     print(f"---VERILOG CODING TEAM: Implementing {task_label}---")
     context_limit = state.get("max_context_chars", 120_000)
-    section_limit = max(context_limit // 8, 6_000)
+    section_limit = split_context_budget(context_limit, 8)
     feedback = render_review_feedback(
         state,
         (

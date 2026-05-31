@@ -1507,6 +1507,13 @@ def clip_text(text: str, max_chars: int) -> str:
     return text[:max_chars] + f"\n\n[TRUNCATED: omitted {omitted} characters]"
 
 
+def split_context_budget(max_chars: int, sections: int = 8) -> int:
+    if max_chars <= 0:
+        return 0
+    sections = max(sections, 1)
+    return max(max_chars // sections, 1)
+
+
 def render_files_for_prompt(files: List[Dict[str, str]], max_chars: int) -> str:
     return clip_text(render_files(files), max_chars)
 
