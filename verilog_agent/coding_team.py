@@ -18,6 +18,8 @@ def verilog_coding_team_agent(state: AgentState):
     task_id = sanitize_artifact_name(task.get("id"), "task")
     task_label = str(task.get("id") or task_id)
     print(f"---VERILOG CODING TEAM: Implementing {task_label}---")
+    context_limit = state.get("max_context_chars", 120_000)
+    section_limit = max(context_limit // 8, 6_000)
     feedback = render_review_feedback(
         state,
         (
@@ -27,7 +29,7 @@ def verilog_coding_team_agent(state: AgentState):
             "verification_lint",
             "coding_format",
         ),
-        state.get("max_context_chars", 120_000),
+        section_limit,
     )
     if feedback != "(none)":
         feedback = (
@@ -72,24 +74,35 @@ Previous candidate RTL to revise, if any:
             ),
         ]
     )
-    response = (prompt | llm).invoke(
+    prompt_payload = {
+        "user_request": clip_text(state["user_request"], section_limit),
+        "architecture_contract": clip_text(
+            state.get("architecture_contract") or "(none)", section_limit
+        ),
+        "task": render_manager_task(task),
+        "manager_handoff": clip_text(current_manager_handoff(state), section_limit),
+        "supervisor_plan": clip_text(state.get("supervisor_plan") or "(none)", section_limit),
+        "control_datapath_plan": clip_text(
+            state.get("control_datapath_plan") or "(none)", section_limit
+        ),
+        "rtl_context": clip_text(state.get("rtl_context") or "(none)", section_limit),
+        "previous_candidate_rtl": render_files_for_prompt(
+            state.get("candidate_files", []), section_limit
+        ),
+        "feedback": feedback,
+    }
+    write_json_artifact(
+        f"logs/{task_id}_coding_prompt_sizes_attempt_{state.get('coding_retry_count', 0) + 1}.json",
         {
-            "user_request": state["user_request"],
-            "architecture_contract": state.get("architecture_contract") or "(none)",
-            "task": render_manager_task(task),
-            "manager_handoff": current_manager_handoff(state),
-            "supervisor_plan": state.get("supervisor_plan") or "(none)",
-            "control_datapath_plan": state.get("control_datapath_plan") or "(none)",
-            "rtl_context": clip_text(
-                state.get("rtl_context") or "(none)",
-                state.get("max_context_chars", 120_000),
-            ),
-            "previous_candidate_rtl": render_files_for_prompt(
-                state.get("candidate_files", []), state.get("max_context_chars", 120_000)
-            ),
-            "feedback": feedback,
-        }
+            "context_limit": context_limit,
+            "section_limit": section_limit,
+            "sections": {
+                key: len(str(value))
+                for key, value in prompt_payload.items()
+            },
+        },
     )
+    response = (prompt | llm).invoke(prompt_payload)
 
     try:
         files = parse_generated_files_response(response.content)
