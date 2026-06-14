@@ -1,0 +1,43 @@
+$date
+  sample
+$end
+$version
+  sample
+$end
+$timescale 1ns $end
+$scope module tb $end
+$scope module dut $end
+$var wire 1 ! clk $end
+$var wire 1 " rst_n $end
+$var wire 1 # acc_valid $end
+$var wire 8 $ acc_data [7:0] $end
+$var wire 1 % out_valid $end
+$var wire 8 & out_data [7:0] $end
+$var wire 2 ' state [1:0] $end
+$upscope $end
+$upscope $end
+$enddefinitions $end
+#18300
+0!
+1"
+0#
+b00000000 $
+0%
+b00000000 &
+b00 '
+#18395
+1!
+b01 '
+#18410
+0!
+1#
+b00110101 $
+#18419
+1!
+b00110001 &
+#18420
+1%
+b10 '
+#18425
+x#
+bxx &

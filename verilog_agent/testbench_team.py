@@ -1,0 +1,188 @@
+from __future__ import annotations
+
+from .runtime import refresh_globals
+
+
+def _with_runtime(fn):
+    def wrapped(*args, **kwargs):
+        refresh_globals(globals())
+        return fn(*args, **kwargs)
+    wrapped.__name__ = fn.__name__
+    wrapped.__doc__ = fn.__doc__
+    return wrapped
+
+
+@_with_runtime
+def testbench_team_agent(state: AgentState):
+    print("---TESTBENCH TEAM: Creating Smoke Testbench---")
+    feedback = render_review_feedback(
+        state,
+        ("testbench", "final_lint"),
+        state.get("max_context_chars", 120_000),
+    )
+    if feedback != "(none)":
+        feedback = (
+            "Previous testbench generation failure to fix:\n"
+            f"{feedback}"
+        )
+    revision_mode = render_revision_mode(
+        state, ("testbench", "final_lint"), "testbench files", "testbench_retry_count"
+    )
+    revision_checklist = render_revision_checklist(
+        state,
+        ("testbench", "final_lint"),
+        "testbench files",
+        state.get("max_context_chars", 120_000),
+    )
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            (
+                "system",
+                load_prompt("testbench.md"),
+            ),
+            (
+                "human",
+                """
+Original user requirement:
+{user_request}
+
+Accepted RTL files:
+{rtl_context}
+
+Top module candidates, in observed order:
+{top_module_candidates}
+
+Testbench revision mode:
+{revision_mode}
+
+Previous testbench files to revise, if any:
+{previous_testbench_files}
+
+Testbench revision checklist:
+{revision_checklist}
+
+{feedback}
+""",
+            ),
+        ]
+    )
+    response = (prompt | llm).invoke(
+        {
+            "user_request": state["user_request"],
+            "rtl_context": render_files_for_prompt(
+                state.get("final_files", []), state.get("max_context_chars", 120_000)
+            ),
+            "top_module_candidates": ", ".join(state.get("top_module_candidates", [])) or "(unknown)",
+            "previous_testbench_files": render_files_for_prompt(
+                state.get("testbench_files", []), state.get("max_context_chars", 120_000)
+            ),
+            "revision_mode": revision_mode,
+            "revision_checklist": revision_checklist,
+            "feedback": feedback,
+        }
+    )
+    write_text_artifact("logs/testbench_revision_checklist.md", revision_checklist)
+
+    try:
+        files = parse_generated_files_response(response.content)
+        is_valid, validation_error = validate_generated_files(
+            files,
+            state.get("max_generated_file_bytes", 500_000),
+            state.get("max_generated_files", 64),
+        )
+        if not is_valid:
+            raise ValueError(validation_error)
+        if review_feedback_entries(state, ("testbench", "final_lint")) and state.get("testbench_files"):
+            previous_names = {
+                str(file_info.get("filename", "")).strip()
+                for file_info in state.get("testbench_files", [])
+            }
+            current_names = {
+                str(file_info.get("filename", "")).strip()
+                for file_info in files
+            }
+            missing = sorted(name for name in previous_names if name and name not in current_names)
+            unchanged = generated_files_fingerprint(files) == generated_files_fingerprint(
+                state.get("testbench_files", [])
+            )
+            if missing or unchanged:
+                if missing:
+                    report = (
+                        "Testbench revision did not return every previous testbench file. "
+                        f"Missing files: {', '.join(missing)}"
+                    )
+                else:
+                    report = (
+                        "Testbench revision returned unchanged files after failure feedback. "
+                        "The testbench must be modified to address the previous failure."
+                    )
+                write_text_artifact(
+                    f"failed_attempts/testbench_unchanged_after_review_attempt_{state.get('testbench_retry_count', 0) + 1}.txt",
+                    render_files(files) + "\n\n" + report,
+                )
+                return {
+                    "generation_ok": False,
+                    "verification_report": report,
+                    "testbench_retry_count": state.get("testbench_retry_count", 0) + 1,
+                    "failed_stage": "testbench",
+                    "blocking_report": report,
+                    "review_feedback_log": append_review_feedback(
+                        state, "testbench", report, "testbench"
+                    ),
+                    "messages": [response],
+                }
+        write_json_artifact("logs/testbench_files.json", files)
+        return {
+            "testbench_files": files,
+            "generation_ok": True,
+            "failed_stage": "",
+            "blocking_report": "",
+            "messages": [response],
+        }
+    except (json.JSONDecodeError, TypeError, ValueError) as exc:
+        print(f"---ERROR: Testbench team produced invalid JSON: {exc}---")
+        write_text_artifact(
+            f"failed_attempts/testbench_invalid_json_attempt_{state.get('testbench_retry_count', 0) + 1}.txt",
+            response.content,
+        )
+        report = f"Testbench generation failed: {exc}"
+        return {
+            "testbench_files": [],
+            "generation_ok": False,
+            "verification_report": report,
+            "testbench_retry_count": state.get("testbench_retry_count", 0) + 1,
+            "failed_stage": "testbench",
+            "blocking_report": report,
+            "review_feedback_log": append_review_feedback(state, "testbench", report, "testbench"),
+            "messages": [response],
+        }
+
+
+@_with_runtime
+def final_lint_agent(state: AgentState):
+    print("---FINAL LINT: Checking RTL and Testbench Together---")
+    all_files = state.get("final_files", []) + state.get("testbench_files", [])
+    lint_result = run_syntax_lint(
+        all_files,
+        state.get("require_lint", False),
+        state.get("lint_timeout_seconds", 30),
+    )
+    write_text_artifact("logs/final_lint_report.txt", lint_result["report"])
+    if lint_result["passed"]:
+        return {
+            "final_lint_passed": True,
+            "final_lint_report": lint_result["report"],
+            "failed_stage": "",
+            "blocking_report": "",
+        }
+    return {
+        "final_lint_passed": False,
+        "final_lint_report": lint_result["report"],
+        "generation_ok": False,
+        "testbench_retry_count": state.get("testbench_retry_count", 0) + 1,
+        "failed_stage": "final_lint",
+        "blocking_report": lint_result["report"],
+        "review_feedback_log": append_review_feedback(
+            state, "final_lint", lint_result["report"], "testbench"
+        ),
+    }

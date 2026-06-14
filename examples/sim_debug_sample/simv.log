@@ -1,0 +1,4 @@
++ntb_random_seed=12345
+UVM_INFO @ 0 ns: uvm_test_top [RUN] starting directed pipeline test
+UVM_ERROR examples/sim_debug_sample/rtl/top.v(23) @ 18420 ns: uvm_test_top.env.scoreboard [MISMATCH] expected out_data=0x35 actual out_data=0x31
+UVM_FATAL @ 18425 ns: uvm_test_top.env [TEST_FAILED] scoreboard mismatch limit reached

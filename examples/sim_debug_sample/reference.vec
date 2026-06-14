@@ -1,0 +1,4 @@
+cycle=0 time=18300ns out_data=0x00
+cycle=1 time=18410ns out_data=0x35
+cycle=2 time=18420ns out_data=0x35
+cycle=3 time=18425ns out_data=0x35
