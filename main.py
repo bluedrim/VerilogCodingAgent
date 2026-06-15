@@ -1024,7 +1024,6 @@ CODING_REPAIR_BACKLOG_STAGES = (
     "coding_format",
     "coding_unchanged",
     "coding_preflight",
-    "coding_review_gate",
 )
 
 

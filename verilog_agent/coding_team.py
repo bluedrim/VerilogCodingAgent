@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import difflib
+import hashlib
+import json
+import re
 
 from .runtime import refresh_globals
 
@@ -14,6 +17,13 @@ def _with_runtime(fn):
     return wrapped
 
 
+def _strip_hdl_comments(content: str) -> str:
+    runtime_strip = globals().get("strip_hdl_comments")
+    if callable(runtime_strip):
+        return runtime_strip(content)
+    return re.sub(r"//.*?$|/\*.*?\*/", "", content, flags=re.S | re.M)
+
+
 IMPLEMENTATION_REVIEW_STAGES = (
     "control_datapath_review",
     "microarchitecture_review",
@@ -22,7 +32,6 @@ IMPLEMENTATION_REVIEW_STAGES = (
     "coding_format",
     "coding_unchanged",
     "coding_preflight",
-    "coding_review_gate",
 )
 
 
@@ -345,7 +354,7 @@ def _functional_files_fingerprint(files: list[dict[str, str]]) -> str:
     for file_info in sorted(files, key=lambda item: item.get("filename", "")):
         filename = str(file_info.get("filename", "")).strip()
         content = str(file_info.get("content", ""))
-        stripped = strip_hdl_comments(content)
+        stripped = _strip_hdl_comments(content)
         normalized = re.sub(r"\s+", "", stripped)
         entries.append(
             {
@@ -362,7 +371,7 @@ def _functional_file_hashes(files: list[dict[str, str]]) -> dict[str, str]:
     for file_info in files:
         filename = str(file_info.get("filename", "")).strip()
         content = str(file_info.get("content", ""))
-        stripped = strip_hdl_comments(content)
+        stripped = _strip_hdl_comments(content)
         normalized = re.sub(r"\s+", "", stripped)
         hashes[filename] = hashlib.sha256(normalized.encode()).hexdigest()
     return hashes
@@ -373,7 +382,7 @@ def _functional_compare_text(files: list[dict[str, str]]) -> str:
     for file_info in sorted(files, key=lambda item: item.get("filename", "")):
         filename = str(file_info.get("filename", "")).strip()
         content = str(file_info.get("content", ""))
-        stripped = strip_hdl_comments(content)
+        stripped = _strip_hdl_comments(content)
         normalized = re.sub(r"\s+", " ", stripped).strip()
         chunks.append(f"FILE {filename}\n{normalized}")
     return "\n".join(chunks)
@@ -522,7 +531,7 @@ def _reject_incomplete_review_repair(
         "messages": messages,
         "error_message": report,
         "review_feedback_log": append_review_feedback(
-            state, "coding_review_gate", report, task_id
+            state, "coding_gate_internal", report, task_id
         ),
     }
 
@@ -576,13 +585,27 @@ def _coding_preflight_report(state: AgentState, files: list[dict[str, str]]) -> 
     return "\n\n".join(issues)
 
 
-def _review_gate_report(state: AgentState, files: list[dict[str, str]]) -> str:
+def _hard_review_gate_report(state: AgentState, files: list[dict[str, str]]) -> str:
     reports = []
     for report in (
         _incomplete_review_repair_report(state, files),
         _unchanged_reviewed_candidate_report(state, files),
-        _review_repair_delta_report(state, files),
         _coding_preflight_report(state, files),
+    ):
+        if report:
+            reports.append(report)
+    return "\n\n".join(reports)
+
+
+def _soft_review_scope_report(state: AgentState, files: list[dict[str, str]]) -> str:
+    return _review_repair_delta_report(state, files)
+
+
+def _review_gate_report(state: AgentState, files: list[dict[str, str]]) -> str:
+    reports = []
+    for report in (
+        _hard_review_gate_report(state, files),
+        _soft_review_scope_report(state, files),
     ):
         if report:
             reports.append(report)
@@ -652,7 +675,7 @@ def _reject_review_gate_failure(
         "messages": messages,
         "error_message": report,
         "review_feedback_log": append_review_feedback(
-            state, "coding_review_gate", report, task_id
+            state, "coding_gate_internal", report, task_id
         ),
     }
 
@@ -785,25 +808,44 @@ def _repair_candidate_against_review_gate(
     if not gate_report:
         return files, messages, ""
 
+    initial_hard_report = _hard_review_gate_report(state, files)
     repaired_files, repair_response, repair_error = _attempt_review_gate_repair(
         state, task, task_id, files, gate_report, prompt_payload, section_limit
     )
     next_messages = messages + ([repair_response] if repair_response else [])
     if repaired_files is None:
+        if not initial_hard_report:
+            write_text_artifact(
+                f"logs/{task_id}_review_gate_soft_warning_attempt_{state.get('coding_retry_count', 0) + 1}.md",
+                gate_report + f"\n\nAutomated soft-scope repair failed: {repair_error}\nContinuing to external reviewers.",
+            )
+            return files, next_messages, ""
         return (
             files,
             next_messages,
             gate_report + f"\n\nAutomated review-gate repair failed: {repair_error}",
         )
 
-    second_report = _review_gate_report(state, repaired_files)
-    if second_report:
+    second_hard_report = _hard_review_gate_report(state, repaired_files)
+    second_soft_report = _soft_review_scope_report(state, repaired_files)
+    if second_hard_report:
         return (
             repaired_files,
             next_messages,
-            second_report
-            + "\n\nAutomated review-gate repair was attempted but did not close all issues.",
+            second_hard_report
+            + "\n\nAutomated review-gate repair was attempted but did not close hard gate issues.",
         )
+    if second_soft_report:
+        write_text_artifact(
+            f"logs/{task_id}_review_gate_soft_warning_attempt_{state.get('coding_retry_count', 0) + 1}.md",
+            second_soft_report
+            + "\n\nAutomated review-gate repair was attempted. Continuing to external reviewers because only soft repair-scope concerns remain.",
+        )
+        write_json_artifact(
+            f"logs/{task_id}_review_gate_soft_scope_audit_attempt_{state.get('coding_retry_count', 0) + 1}.json",
+            _coding_repair_scope_audit(state, repaired_files),
+        )
+        return repaired_files, next_messages, ""
 
     write_json_artifact(
         f"logs/{task_id}_review_gate_repaired_attempt_{state.get('coding_retry_count', 0) + 1}.json",
