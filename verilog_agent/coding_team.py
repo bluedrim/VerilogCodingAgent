@@ -54,6 +54,15 @@ UNCHANGED_GATE_MARKERS = (
 )
 
 
+def _code_free_status_message(stage: str, task_id: str, detail: str) -> AIMessage:
+    return AIMessage(
+        content=(
+            f"{stage} for {task_id}: {detail} "
+            "Generated Verilog code is carried only in structured file fields and artifacts."
+        )
+    )
+
+
 def _review_feedback_for_coding(state: AgentState, max_chars: int) -> str:
     return render_review_feedback(state, IMPLEMENTATION_REVIEW_STAGES, max_chars)
 
@@ -967,9 +976,25 @@ Raw reviewer feedback:
             f"failed_attempts/{task_id}_review_gate_repair_invalid_attempt_{attempt}.txt",
             repair_response.content,
         )
-        return None, repair_response, str(exc)
+        return (
+            None,
+            _code_free_status_message(
+                "review-gate repair",
+                task_id,
+                f"invalid output rejected; raw response saved to failed_attempts/{task_id}_review_gate_repair_invalid_attempt_{attempt}.txt",
+            ),
+            str(exc),
+        )
 
-    return repaired_files, repair_response, ""
+    return (
+        repaired_files,
+        _code_free_status_message(
+            "review-gate repair",
+            task_id,
+            f"parsed {len(repaired_files)} revised file(s); raw response saved under logs/",
+        ),
+        "",
+    )
 
 
 def _repair_candidate_against_review_gate(
@@ -1303,7 +1328,17 @@ Review-to-code repair contract:
             },
         },
     )
+    attempt = state.get("coding_retry_count", 0) + 1
     response = (prompt | llm).invoke(prompt_payload)
+    write_text_artifact(
+        f"logs/{task_id}_coding_raw_attempt_{attempt}.txt",
+        response.content,
+    )
+    initial_status_message = _code_free_status_message(
+        "coding",
+        task_id,
+        f"raw response saved to logs/{task_id}_coding_raw_attempt_{attempt}.txt",
+    )
 
     try:
         files = parse_generated_files_response(response.content)
@@ -1334,7 +1369,7 @@ Review-to-code repair contract:
 
     if initial_error is None:
         files, accepted_messages, gate_report = _repair_candidate_against_review_gate(
-            state, task, task_id, files, prompt_payload, section_limit, [response]
+            state, task, task_id, files, prompt_payload, section_limit, [initial_status_message]
         )
         if gate_report:
             return _reject_review_gate_failure(
@@ -1464,7 +1499,14 @@ Parser or validation error:
                 files,
                 prompt_payload,
                 section_limit,
-                [response, repair_response],
+                [
+                    initial_status_message,
+                    _code_free_status_message(
+                        "coding format repair",
+                        task_id,
+                        f"raw response saved to logs/{task_id}_coding_repair_raw_attempt_{attempt}.txt",
+                    ),
+                ],
             )
             if gate_report:
                 return _reject_review_gate_failure(
@@ -1514,7 +1556,13 @@ Parser or validation error:
         "coding_retry_count": state.get("coding_retry_count", 0) + 1,
         "failed_stage": "coding",
         "blocking_report": report,
-        "messages": [response],
+        "messages": [
+            _code_free_status_message(
+                "coding",
+                task_id,
+                f"output remained invalid after repair; raw responses saved under failed_attempts/ and logs/",
+            )
+        ],
         "error_message": str(exc),
         "review_feedback_log": append_review_feedback(state, "coding_format", report, task_id),
     }

@@ -192,7 +192,7 @@ def summary_agent(state: AgentState):
 
 @_with_runtime
 def collect_writer_errors(state: AgentState):
-    errors = []
+    errors = list(state.get("writer_errors", []))
     for message in state.get("messages", []):
         if not isinstance(message, ToolMessage):
             continue
@@ -208,18 +208,20 @@ def writer_agent(state: AgentState):
     files = state.get("final_files", []) + state.get("testbench_files", [])
     if not files:
         print("---ERROR: No files to write.---")
-        return {}
+        return {"writer_errors": ["No files to write."]}
 
-    tool_calls = []
-    for idx, file_info in enumerate(files):
-        tool_calls.append(
+    results = []
+    errors = []
+    for file_info in files:
+        result = write_verilog_file.invoke(
             {
-                "id": f"tool_call_writer_{idx}",
-                "name": "write_verilog_file",
-                "args": {
-                    "filename": file_info["filename"],
-                    "content": file_info["content"],
-                },
+                "filename": file_info["filename"],
+                "content": file_info["content"],
             }
         )
-    return {"messages": [AIMessage(content="", tool_calls=tool_calls)]}
+        result_text = str(result)
+        results.append(result_text)
+        print(f"- {result_text}")
+        if result_text.lower().startswith("error"):
+            errors.append(result_text)
+    return {"writer_results": results, "writer_errors": errors}

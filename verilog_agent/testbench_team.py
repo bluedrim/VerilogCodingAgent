@@ -12,6 +12,15 @@ def _with_runtime(fn):
     return wrapped
 
 
+def _testbench_status_message(detail: str) -> AIMessage:
+    return AIMessage(
+        content=(
+            f"testbench generation: {detail} "
+            "Generated testbench code is carried only in structured file fields and artifacts."
+        )
+    )
+
+
 @_with_runtime
 def testbench_team_agent(state: AgentState):
     print("---TESTBENCH TEAM: Creating Smoke Testbench---")
@@ -81,6 +90,11 @@ Testbench revision checklist:
             "feedback": feedback,
         }
     )
+    attempt = state.get("testbench_retry_count", 0) + 1
+    write_text_artifact(
+        f"logs/testbench_raw_attempt_{attempt}.txt",
+        response.content,
+    )
     write_text_artifact("logs/testbench_revision_checklist.md", revision_checklist)
 
     try:
@@ -129,7 +143,11 @@ Testbench revision checklist:
                     "review_feedback_log": append_review_feedback(
                         state, "testbench", report, "testbench"
                     ),
-                    "messages": [response],
+                    "messages": [
+                        _testbench_status_message(
+                            f"unchanged revision rejected; raw response saved to logs/testbench_raw_attempt_{attempt}.txt"
+                        )
+                    ],
                 }
         write_json_artifact("logs/testbench_files.json", files)
         return {
@@ -137,7 +155,11 @@ Testbench revision checklist:
             "generation_ok": True,
             "failed_stage": "",
             "blocking_report": "",
-            "messages": [response],
+            "messages": [
+                _testbench_status_message(
+                    f"parsed {len(files)} file(s); raw response saved to logs/testbench_raw_attempt_{attempt}.txt"
+                )
+            ],
         }
     except (json.JSONDecodeError, TypeError, ValueError) as exc:
         print(f"---ERROR: Testbench team produced invalid JSON: {exc}---")
@@ -154,7 +176,11 @@ Testbench revision checklist:
             "failed_stage": "testbench",
             "blocking_report": report,
             "review_feedback_log": append_review_feedback(state, "testbench", report, "testbench"),
-            "messages": [response],
+            "messages": [
+                _testbench_status_message(
+                    f"invalid output rejected; raw response saved to failed_attempts/ and logs/testbench_raw_attempt_{attempt}.txt"
+                )
+            ],
         }
 
 

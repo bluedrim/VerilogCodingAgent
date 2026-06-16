@@ -182,7 +182,6 @@ try:
     from langchain_core.prompts import ChatPromptTemplate
     from langchain_ollama.chat_models import ChatOllama
     from langgraph.graph import END, StateGraph
-    from langgraph.prebuilt import ToolNode
 
     from tools import write_verilog_file
 except ModuleNotFoundError as exc:
@@ -238,6 +237,8 @@ class AgentState(TypedDict):
     allow_blackboxes: bool
     final_lint_passed: bool
     final_lint_report: str
+    writer_results: List[str]
+    writer_errors: List[str]
     human_approved: bool
     skip_testbench: bool
     max_retries: int
@@ -411,7 +412,6 @@ def llm_config(
 
 llm = None
 active_llm_config = llm_config()
-writer_tools = [write_verilog_file]
 ARTIFACT_DIR = Path(os.getenv("ARTIFACT_DIR", "generated_rtl"))
 PROMPT_DIR = Path(__file__).resolve().parent / "prompts"
 
@@ -1806,9 +1806,6 @@ from verilog_agent.verification_team import verification_team_agent
 
 agent_runtime.bind(sys.modules[__name__])
 
-writer_tool_node = ToolNode(writer_tools)
-
-
 # --- 5. Conditional Edges ---
 def coding_condition(state: AgentState):
     if state.get("generation_ok"):
@@ -1929,7 +1926,6 @@ workflow.add_node("final_lint", final_lint_agent)
 workflow.add_node("final_review", final_review_agent)
 workflow.add_node("summary", summary_agent)
 workflow.add_node("writer", writer_agent)
-workflow.add_node("writer_tool", writer_tool_node)
 
 workflow.set_entry_point("intake")
 
@@ -2008,12 +2004,7 @@ workflow.add_conditional_edges(
     final_review_condition,
     {"write": "writer", "summary": "summary"},
 )
-workflow.add_conditional_edges(
-    "writer",
-    lambda state: "tool" if state.get("final_files") or state.get("testbench_files") else "end",
-    {"tool": "writer_tool", "end": END},
-)
-workflow.add_edge("writer_tool", "summary")
+workflow.add_edge("writer", "summary")
 workflow.add_edge("summary", END)
 
 app = workflow.compile()
@@ -2142,6 +2133,8 @@ if __name__ == "__main__":
         else int(os.getenv("LLM_TIMEOUT_SECONDS", "180")),
         "final_lint_passed": False,
         "final_lint_report": "",
+        "writer_results": [],
+        "writer_errors": [],
         "human_approved": False,
         "skip_testbench": args.no_testbench,
         "max_retries": args.max_retries,
@@ -2163,9 +2156,13 @@ if __name__ == "__main__":
         result = app.invoke(initial_state, config={"recursion_limit": args.graph_recursion_limit})
         print("\nProcess finished.")
         print("Generated files:")
-        for message in result.get("messages", []):
-            if isinstance(message, ToolMessage):
-                print(f"- {message.content}")
+        writer_results = result.get("writer_results", [])
+        if writer_results:
+            for item in writer_results:
+                print(f"- {item}")
+        else:
+            for file_info in result.get("final_files", []) + result.get("testbench_files", []):
+                print(f"- {ARTIFACT_DIR / file_info.get('filename', '')}")
     except KeyboardInterrupt:
         print("\nProcess interrupted by user. Exiting.")
         sys.exit(0)
