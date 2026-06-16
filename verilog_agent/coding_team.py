@@ -213,14 +213,23 @@ def _extract_module_headers(files: list[dict[str, str]], max_chars: int) -> str:
     return clip_text("\n".join(headers), max_chars)
 
 
-def _render_previous_candidate_for_coding(state: AgentState, max_chars: int) -> str:
+def _render_previous_candidate_for_coding(
+    state: AgentState,
+    max_chars: int,
+    force_anti_stall: bool = False,
+    anti_stall_reason: str = "",
+) -> str:
     previous_files = state.get("candidate_files", [])
-    if not _is_anti_stall_mode(state):
+    if not force_anti_stall and not _is_anti_stall_mode(state):
         return render_files_for_prompt(previous_files, max_chars)
 
+    reason = (
+        str(anti_stall_reason or "").strip()
+        or "the Coding Team previously returned the same RTL unchanged after reviewer feedback."
+    )
     lines = [
         "ANTI-STALL MODE: previous full RTL body is intentionally withheld.",
-        "Reason: the Coding Team previously returned the same RTL unchanged after reviewer feedback.",
+        f"Reason: {reason}",
         "Do not reconstruct by copying the old body. Regenerate the implementation from the architecture/review obligations while preserving required filenames, module names, ports, and parameters.",
         "",
         "Required previous file manifest:",
@@ -868,6 +877,13 @@ def _attempt_review_gate_repair(
     section_limit: int,
 ):
     attempt = state.get("coding_retry_count", 0) + 1
+    force_anti_stall = _is_unchanged_gate_report(gate_report)
+    gate_candidate_reference = _render_previous_candidate_for_coding(
+        state,
+        section_limit,
+        force_anti_stall=force_anti_stall,
+        anti_stall_reason=gate_report if force_anti_stall else "",
+    )
     print("---VERILOG CODING TEAM: Local review gate failed; invoking focused repair pass---")
     write_text_artifact(
         f"logs/{task_id}_review_gate_failure_attempt_{attempt}.md",
@@ -944,10 +960,14 @@ Raw reviewer feedback:
             "implementation_obligations": prompt_payload["implementation_obligations"],
             "repair_intensity": prompt_payload["repair_intensity"],
             "coding_action_plan": prompt_payload["coding_action_plan"],
-            "previous_candidate_rtl": prompt_payload["previous_candidate_rtl"],
+            "previous_candidate_rtl": (
+                gate_candidate_reference
+                if force_anti_stall
+                else prompt_payload["previous_candidate_rtl"]
+            ),
             "current_candidate_rtl": (
-                _render_previous_candidate_for_coding(state, section_limit)
-                if _is_unchanged_gate_report(gate_report)
+                gate_candidate_reference
+                if force_anti_stall
                 else render_files_for_prompt(files, section_limit)
             ),
             "coding_repair_backlog": prompt_payload["coding_repair_backlog"],
