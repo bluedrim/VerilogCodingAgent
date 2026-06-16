@@ -31,6 +31,7 @@ IMPLEMENTATION_REVIEW_STAGES = (
     "verification",
     "verification_lint",
     "coding_format",
+    "coding_gate_internal",
     "coding_unchanged",
     "coding_preflight",
 )
@@ -48,6 +49,8 @@ LOCAL_CODING_GATE_STAGES = {
 UNCHANGED_GATE_MARKERS = (
     "identical to the previous candidate",
     "unchanged files are not accepted",
+    "returned all previous files but none changed",
+    "none changed functionally",
     "changed only comments",
     "whitespace",
     "formatting after reviewer feedback",
@@ -184,16 +187,31 @@ def _is_unchanged_gate_report(report: str) -> bool:
     return any(marker in lowered for marker in UNCHANGED_GATE_MARKERS)
 
 
-def _is_anti_stall_mode(state: AgentState) -> bool:
-    if str(state.get("failed_stage") or "") not in LOCAL_CODING_GATE_STAGES:
-        return False
-    report = str(
+def _coding_anti_stall_level(state: AgentState) -> int:
+    level = 0
+    current_report = str(
         state.get("blocking_report")
         or state.get("error_message")
         or state.get("verification_report")
         or ""
     )
-    return _is_unchanged_gate_report(report)
+    if (
+        str(state.get("failed_stage") or "") in LOCAL_CODING_GATE_STAGES
+        and _is_unchanged_gate_report(current_report)
+    ):
+        level += 1
+
+    for entry in state.get("review_feedback_log", []):
+        stage = str(entry.get("stage") or "")
+        if stage not in IMPLEMENTATION_REVIEW_STAGES and stage not in LOCAL_CODING_GATE_STAGES:
+            continue
+        if _is_unchanged_gate_report(str(entry.get("report") or "")):
+            level += 1
+    return level
+
+
+def _is_anti_stall_mode(state: AgentState) -> bool:
+    return _coding_anti_stall_level(state) > 0
 
 
 def _extract_module_headers(files: list[dict[str, str]], max_chars: int) -> str:
@@ -227,8 +245,10 @@ def _render_previous_candidate_for_coding(
         str(anti_stall_reason or "").strip()
         or "the Coding Team previously returned the same RTL unchanged after reviewer feedback."
     )
+    anti_stall_level = _coding_anti_stall_level(state)
     lines = [
         "ANTI-STALL MODE: previous full RTL body is intentionally withheld.",
+        f"Anti-stall level: {anti_stall_level}",
         f"Reason: {reason}",
         "Do not reconstruct by copying the old body. Regenerate the implementation from the architecture/review obligations while preserving required filenames, module names, ports, and parameters.",
         "",
@@ -307,6 +327,13 @@ def _render_implementation_obligation_packet(
 
 def _coding_revision_mode(state: AgentState) -> str:
     attempt = state.get("coding_retry_count", 0) + 1
+    if _is_anti_stall_mode(state):
+        return (
+            f"anti-stall rebuild attempt {attempt}; the previous RTL was rejected as "
+            "unchanged after review feedback, so regenerate a functionally different "
+            "replacement from the architecture/review obligations while preserving the "
+            "required interfaces and filenames"
+        )
     if _coding_feedback_entries(state):
         return (
             f"review-driven retry attempt {attempt}; revise the previous candidate RTL "
@@ -370,6 +397,12 @@ def _render_review_to_code_contract(state: AgentState, max_chars: int) -> str:
         "",
         "Previous candidate files that must be repaired or preserved:",
     ]
+    if _is_anti_stall_mode(state):
+        lines[1:1] = [
+            "- Anti-stall mode is active: do not copy or lightly restyle the previous RTL body.",
+            "- Rebuild the affected control/datapath behavior from the obligations and reviewer findings.",
+            "- The next candidate must make the previous unchanged/identical failure impossible to repeat.",
+        ]
     for item in build_file_manifest(previous_files):
         sha = str(item.get("sha256", ""))
         lines.append(f"- {item.get('filename')}: {item.get('bytes')} bytes, sha256={sha[:12]}")
@@ -413,15 +446,25 @@ def _render_deterministic_coding_action_plan(state: AgentState, max_chars: int) 
         repair_backlog,
     ]
     if state.get("candidate_files"):
-        lines.extend(
-            [
-                "",
-                "Previous candidate handling:",
-                "- Start from the previous candidate RTL.",
-                "- Preserve required module interfaces and filenames.",
-                "- Make real functional changes in the RTL behavior, not comments or formatting.",
-            ]
-        )
+        lines.extend(["", "Previous candidate handling:"])
+        if _is_anti_stall_mode(state):
+            lines.extend(
+                [
+                    "- Anti-stall mode is active because a reviewed retry returned unchanged RTL.",
+                    "- Do not use the previous RTL body as the edit source.",
+                    "- Use only the previous manifest and module/interface reference to preserve filenames, module names, ports, and parameters.",
+                    "- Rebuild the affected FSM/control/datapath logic from the architecture, Supervisor assignment, Control/Data Path plan, and reviewer findings.",
+                    "- Make a functional RTL change large enough that the previous unchanged/identical gate report cannot still apply.",
+                ]
+            )
+        else:
+            lines.extend(
+                [
+                    "- Start from the previous candidate RTL.",
+                    "- Preserve required module interfaces and filenames.",
+                    "- Make real functional changes in the RTL behavior, not comments or formatting.",
+                ]
+            )
     if entries:
         lines.extend(["", "Required review repairs:"])
         lines.extend(
@@ -453,7 +496,9 @@ def _build_coding_action_plan(
     section_limit: int,
 ) -> str:
     deterministic_plan = _render_deterministic_coding_action_plan(state, section_limit)
-    if not (_coding_feedback_entries(state) or state.get("candidate_files")):
+    if _is_anti_stall_mode(state) or not (
+        _coding_feedback_entries(state) or state.get("candidate_files")
+    ):
         write_text_artifact(
             f"logs/{task_id}_coding_action_plan_attempt_{state.get('coding_retry_count', 0) + 1}.md",
             deterministic_plan,
@@ -884,6 +929,16 @@ def _attempt_review_gate_repair(
         force_anti_stall=force_anti_stall,
         anti_stall_reason=gate_report if force_anti_stall else "",
     )
+    coding_action_plan = prompt_payload["coding_action_plan"]
+    if force_anti_stall:
+        coding_action_plan = (
+            "ANTI-STALL OVERRIDE FOR THIS REPAIR PASS:\n"
+            "- The rejected candidate matched the previous reviewed RTL, so copying/editing from the old body is forbidden in this repair pass.\n"
+            "- Preserve required filenames, module names, ports, and parameters from the manifest/interface reference only.\n"
+            "- Rebuild the affected control/datapath behavior from the architecture, Supervisor assignment, Control/Data Path plan, and reviewer findings.\n"
+            "- Return a functionally different RTL candidate; the unchanged/identical gate report must not remain true.\n\n"
+            + coding_action_plan
+        )
     print("---VERILOG CODING TEAM: Local review gate failed; invoking focused repair pass---")
     write_text_artifact(
         f"logs/{task_id}_review_gate_failure_attempt_{attempt}.md",
@@ -959,7 +1014,7 @@ Raw reviewer feedback:
             "control_datapath_plan": prompt_payload["control_datapath_plan"],
             "implementation_obligations": prompt_payload["implementation_obligations"],
             "repair_intensity": prompt_payload["repair_intensity"],
-            "coding_action_plan": prompt_payload["coding_action_plan"],
+            "coding_action_plan": coding_action_plan,
             "previous_candidate_rtl": (
                 gate_candidate_reference
                 if force_anti_stall

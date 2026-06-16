@@ -1032,6 +1032,7 @@ CODING_REPAIR_BACKLOG_STAGES = (
     "verification",
     "verification_lint",
     "coding_format",
+    "coding_gate_internal",
     "coding_unchanged",
     "coding_preflight",
 )
