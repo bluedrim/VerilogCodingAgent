@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import warnings
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Dict, List, Optional, TypedDict
@@ -168,6 +169,14 @@ if any(arg in {"-h", "--help"} for arg in sys.argv[1:]):
     sys.exit(0)
 
 try:
+    from langchain_core._api.deprecation import LangChainPendingDeprecationWarning
+
+    warnings.filterwarnings(
+        "ignore",
+        message=r"The default value of `allowed_objects` will change in a future version.*",
+        category=LangChainPendingDeprecationWarning,
+    )
+
     from dotenv import load_dotenv
     from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
     from langchain_core.prompts import ChatPromptTemplate
