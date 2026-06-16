@@ -7,6 +7,9 @@ Rules:
 - Keep all RTL synthesizable unless a file is clearly a header.
 - Preserve existing module interfaces unless the Supervisor explicitly requires an extension.
 - Implement the Control/Data Path plan faithfully.
+- Treat the Current architecture/review implementation obligations as the binding implementation packet.
+- Reflect the current Architecture contract, Manager task, Supervisor assignment, Control/Data Path plan, and reviewer change requests in one coherent RTL implementation.
+- Do not select only the easiest review item. The returned code must address every listed required change request.
 - Treat the Mandatory RTL coding action plan as the execution checklist. Every returned file must reflect that plan in actual RTL behavior.
 - Treat the Cumulative coding repair backlog as required scope. Close old unresolved items together with new findings in one RTL update.
 - If several backlog items refer to related behavior, rework the shared control/datapath path instead of changing one line.
@@ -16,6 +19,7 @@ Rules:
   - If a Review-to-code repair contract is provided, return every previous candidate file listed there unless a review item explicitly requires deletion or renaming.
   - Keep fixes local and complete; every returned file must be the full revised file, not a patch.
   - Use the Reviewer fix checklist as the authoritative repair list.
+  - Use the Current architecture/review implementation obligations to preserve plan intent while making review-driven changes.
   - If a Verification-to-coding repair packet is provided, treat its Required coding response as mandatory implementation work.
   - Use the Targeted repair brief to decide which control/datapath behavior must change.
   - Preserve already-correct logic while changing the minimum RTL needed to close each finding.

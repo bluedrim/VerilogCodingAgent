@@ -25,6 +25,7 @@ def _strip_hdl_comments(content: str) -> str:
 
 
 IMPLEMENTATION_REVIEW_STAGES = (
+    "supervisor_review",
     "control_datapath_review",
     "microarchitecture_review",
     "verification",
@@ -127,6 +128,60 @@ def _render_targeted_repair_brief(state: AgentState, max_chars: int) -> str:
     return clip_text("\n".join(lines), max_chars)
 
 
+def _render_implementation_obligation_packet(
+    state: AgentState, task: dict, max_chars: int
+) -> str:
+    entries = _coding_feedback_entries(state)
+    review_backlog = render_coding_repair_backlog(state, max_chars)
+    chunk_limit = max(800, max_chars // 6)
+    lines = [
+        "Current architecture/review implementation obligations:",
+        "- Implement the current Architecture contract, Manager task, Supervisor assignment, and Control/Data Path plan as one coherent RTL revision.",
+        "- Treat reviewer change requests as required RTL edits unless the current plan explicitly supersedes them.",
+        "- If a review item conflicts with an older plan detail, follow the newest reviewed plan and preserve the review intent in the RTL behavior.",
+        "- Do not satisfy obligations with comments, formatting, renamed signals, or explanatory text.",
+        "- When multiple obligations touch the same behavior, rework the shared FSM/control/datapath path instead of making isolated edits.",
+        "- Before returning, every FILE block must be traceable to the current plan and to each unresolved review item below.",
+        "",
+        "Current Manager task:",
+        render_manager_task(task),
+        "",
+        "Manager handoff packet:",
+        clip_text(current_manager_handoff(state), chunk_limit),
+        "",
+        "Architecture contract obligations to preserve in RTL:",
+        clip_text(state.get("architecture_contract") or "(none)", chunk_limit),
+        "",
+        "Supervisor assignment obligations to implement:",
+        clip_text(state.get("supervisor_plan") or "(none)", chunk_limit),
+        "",
+        "Control/Data Path plan obligations to implement:",
+        clip_text(state.get("control_datapath_plan") or "(none)", chunk_limit),
+        "",
+        "Reviewer-driven RTL change requests to close:",
+        review_backlog,
+        "",
+        "Required implementation response:",
+        "- Update the affected modules/files directly; preserve required file names and module interfaces unless a review item requires a change.",
+        "- Make control logic explicit: state registers, next-state logic, enables, load/clear, done/valid/ready, and error handling when applicable.",
+        "- Make datapath explicit: registers, mux/select behavior, arithmetic/comparison paths, width/sign handling, and output registers when applicable.",
+        "- Align reset behavior with the architecture and reviews for every affected register.",
+        "- Return complete synthesizable Verilog-2001 files only after all listed obligations are reflected in code.",
+    ]
+    if entries:
+        lines.extend(["", "Per-review closure checklist:"])
+        for idx, entry in enumerate(entries[-10:], start=1):
+            report = str(entry.get("report", "")).strip() or "No detailed report."
+            tags = ", ".join(_infer_repair_focus_tags(report))
+            lines.append(
+                f"{idx}. stage={entry.get('stage', 'unknown')} "
+                f"task={entry.get('task_id', 'global')} focus={tags}"
+            )
+            lines.append(f"   required RTL change: {report}")
+            lines.append("   closure evidence: this finding must be obsolete in the returned Verilog.")
+    return clip_text("\n".join(lines), max_chars)
+
+
 def _coding_revision_mode(state: AgentState) -> str:
     attempt = state.get("coding_retry_count", 0) + 1
     if _coding_feedback_entries(state):
@@ -221,10 +276,15 @@ def _render_deterministic_coding_action_plan(state: AgentState, max_chars: int) 
         "Mandatory RTL coding action plan:",
         "- Produce complete Verilog-2001 FILE blocks only.",
         "- Implement the current Manager task and Supervisor assignment directly in RTL.",
+        "- Implement the current Architecture contract and Control/Data Path plan directly in RTL.",
+        "- Close every reviewer-driven change request in the same RTL revision.",
         "- Keep control logic and datapath logic explicit and synthesizable.",
         "- Use this plan as a code-edit checklist before returning files.",
         "",
         f"Task: {task.get('id', 'task')} - {task.get('title', '')}",
+        "",
+        "Current architecture/control-data path implementation obligations:",
+        _render_implementation_obligation_packet(state, task, max_chars // 2),
         "",
         "Cumulative repair backlog digest:",
         repair_backlog,
@@ -295,6 +355,9 @@ Supervisor detailed assignment:
 Control/Data Path plan:
 {control_datapath_plan}
 
+Current architecture/review implementation obligations:
+{implementation_obligations}
+
 Previous candidate RTL:
 {previous_candidate_rtl}
 
@@ -323,6 +386,7 @@ Deterministic minimum action plan:
                 "task": render_manager_task(task),
                 "supervisor_plan": prompt_payload["supervisor_plan"],
                 "control_datapath_plan": prompt_payload["control_datapath_plan"],
+                "implementation_obligations": prompt_payload["implementation_obligations"],
                 "previous_candidate_rtl": prompt_payload["previous_candidate_rtl"],
                 "coding_repair_backlog": prompt_payload["coding_repair_backlog"],
                 "revision_plan": prompt_payload["revision_plan"],
@@ -719,6 +783,9 @@ Supervisor detailed assignment:
 Control/Data Path plan:
 {control_datapath_plan}
 
+Current architecture/review implementation obligations:
+{implementation_obligations}
+
 Coding repair intensity:
 {repair_intensity}
 
@@ -760,6 +827,7 @@ Raw reviewer feedback:
             "manager_handoff": prompt_payload["manager_handoff"],
             "supervisor_plan": prompt_payload["supervisor_plan"],
             "control_datapath_plan": prompt_payload["control_datapath_plan"],
+            "implementation_obligations": prompt_payload["implementation_obligations"],
             "repair_intensity": prompt_payload["repair_intensity"],
             "coding_action_plan": prompt_payload["coding_action_plan"],
             "previous_candidate_rtl": prompt_payload["previous_candidate_rtl"],
@@ -959,6 +1027,9 @@ Supervisor detailed assignment:
 Control/Data Path plan:
 {control_datapath_plan}
 
+Current architecture/review implementation obligations:
+{implementation_obligations}
+
 Mandatory RTL coding action plan:
 {coding_action_plan}
 
@@ -1011,6 +1082,9 @@ Supervisor detailed assignment:
 Control/Data Path plan:
 {control_datapath_plan}
 
+Current architecture/review implementation obligations:
+{implementation_obligations}
+
 Mandatory RTL coding action plan:
 {coding_action_plan}
 
@@ -1059,6 +1133,9 @@ Review-to-code repair contract:
         "control_datapath_plan": clip_text(
             state.get("control_datapath_plan") or "(none)", section_limit
         ),
+        "implementation_obligations": _render_implementation_obligation_packet(
+            state, task, section_limit
+        ),
         "rtl_context": clip_text(state.get("rtl_context") or "(none)", section_limit),
         "revision_mode": _coding_revision_mode(state),
         "repair_intensity": repair_intensity,
@@ -1078,6 +1155,10 @@ Review-to-code repair contract:
         state, task, task_id, prompt_payload, section_limit
     )
     prompt_payload["coding_action_plan"] = coding_action_plan
+    write_text_artifact(
+        f"logs/{task_id}_implementation_obligations_attempt_{state.get('coding_retry_count', 0) + 1}.md",
+        prompt_payload["implementation_obligations"],
+    )
     write_text_artifact(
         f"logs/{task_id}_coding_revision_plan_attempt_{state.get('coding_retry_count', 0) + 1}.md",
         revision_plan,
@@ -1176,6 +1257,15 @@ Current Manager task:
 Supervisor detailed assignment:
 {supervisor_plan}
 
+Architecture contract:
+{architecture_contract}
+
+Control/Data Path plan:
+{control_datapath_plan}
+
+Current architecture/review implementation obligations:
+{implementation_obligations}
+
 Reviewer fix checklist:
 {revision_plan}
 
@@ -1210,6 +1300,9 @@ Parser or validation error:
             {
                 "task": render_manager_task(task),
                 "supervisor_plan": state.get("supervisor_plan") or "(none)",
+                "architecture_contract": prompt_payload["architecture_contract"],
+                "control_datapath_plan": prompt_payload["control_datapath_plan"],
+                "implementation_obligations": prompt_payload["implementation_obligations"],
                 "revision_plan": revision_plan,
                 "repair_brief": repair_brief,
                 "repair_contract": repair_contract,

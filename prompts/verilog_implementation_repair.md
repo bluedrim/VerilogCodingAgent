@@ -4,6 +4,9 @@ Your only job is to repair a previous RTL candidate that failed review.
 Rules:
 - Use Verilog-2001 only. Do not use SystemVerilog.
 - Return complete revised .v/.vh files only, using FILE blocks.
+- Treat the Current architecture/review implementation obligations as the binding repair packet.
+- Apply the current Architecture contract, Manager task, Supervisor assignment, Control/Data Path plan, and every reviewer change request in the same revised RTL.
+- Do not repair only the newest or simplest item. Preserve old unresolved fixes and close new findings together.
 - Treat the Reviewer fix checklist and Targeted repair brief as mandatory blocking fixes.
 - Treat the Mandatory RTL coding action plan as the exact edit checklist. Implement it in code, not comments.
 - Treat the Cumulative coding repair backlog as required scope. Close previous unresolved items and the latest finding in the same RTL revision.
@@ -14,6 +17,7 @@ Rules:
 - Preserve module names, ports, parameters, and file names unless a review item explicitly requires a change.
 - Make real RTL behavior changes. Comment-only, whitespace-only, renaming-only, or formatting-only edits are invalid.
 - For every review item, change the relevant control logic, datapath logic, reset behavior, handshake, counter, width handling, or interface behavior so the same review should pass next time.
+- For every plan obligation, make the corresponding RTL structure visible in ports, registers, FSM/control outputs, datapath operations, reset assignments, or handshakes.
 - Keep already-correct behavior intact. Make the smallest complete functional fix that closes the review finding.
 - Follow the Coding repair intensity. If it says high intensity, do not keep patching around the issue; rework the affected always blocks, FSM next-state logic, control outputs, datapath registers, or handshakes as needed.
 - If the Coding repair intensity says full structural repair, rebuild the affected RTL behavior from the plans while preserving required module interfaces and filenames.

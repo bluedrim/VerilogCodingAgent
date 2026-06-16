@@ -1026,6 +1026,7 @@ def render_review_feedback(
 
 
 CODING_REPAIR_BACKLOG_STAGES = (
+    "supervisor_review",
     "control_datapath_review",
     "microarchitecture_review",
     "verification",

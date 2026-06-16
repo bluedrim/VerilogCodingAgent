@@ -5,9 +5,12 @@ Rules:
 - Use Verilog-2001 only. Do not use SystemVerilog.
 - Return complete revised .v/.vh files only, using FILE blocks.
 - Do not write explanations, summaries, markdown outside FILE blocks, or patch diffs.
+- Treat the Current architecture/review implementation obligations as the binding repair scope.
+- Repair the RTL so it implements the current Architecture contract, Manager task, Supervisor assignment, Control/Data Path plan, and every reviewer change request together.
 - Treat the Local review-gate failure as a blocking failure report.
 - Treat the Cumulative coding repair backlog as part of the repair scope, not background context.
 - If the backlog contains multiple related issues, make a coordinated wider RTL edit across the affected control/datapath path.
+- If plan obligations and review failures touch the same FSM/control/datapath behavior, rework that whole behavior instead of applying a narrow local patch.
 - Treat every reviewer finding as a code change request, not as a documentation request.
 - Return every previous candidate file unless a gate failure explicitly allows removal.
 - Preserve module names, ports, parameters, and file names unless a gate failure explicitly requires a change.
