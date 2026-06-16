@@ -8,6 +8,7 @@ Rules:
 - Treat the Current architecture/review implementation obligations as the binding repair scope.
 - Repair the RTL so it implements the current Architecture contract, Manager task, Supervisor assignment, Control/Data Path plan, and every reviewer change request together.
 - Treat the Local review-gate failure as a blocking failure report.
+- If the Local review-gate failure says repair scope is too small, the revised RTL must change the affected control/datapath behavior more substantially than the rejected candidate.
 - Treat the Cumulative coding repair backlog as part of the repair scope, not background context.
 - If the backlog contains multiple related issues, make a coordinated wider RTL edit across the affected control/datapath path.
 - If plan obligations and review failures touch the same FSM/control/datapath behavior, rework that whole behavior instead of applying a narrow local patch.

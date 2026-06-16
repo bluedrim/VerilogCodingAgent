@@ -7,6 +7,7 @@ Rules:
 - Treat the Current architecture/review implementation obligations as the binding repair packet.
 - Apply the current Architecture contract, Manager task, Supervisor assignment, Control/Data Path plan, and every reviewer change request in the same revised RTL.
 - Do not repair only the newest or simplest item. Preserve old unresolved fixes and close new findings together.
+- If the obligations include a local Coding Team gate failure, close it directly. A shallow-scope failure means the next RTL must change the affected control/datapath behavior more broadly.
 - Treat the Reviewer fix checklist and Targeted repair brief as mandatory blocking fixes.
 - Treat the Mandatory RTL coding action plan as the exact edit checklist. Implement it in code, not comments.
 - Treat the Cumulative coding repair backlog as required scope. Close previous unresolved items and the latest finding in the same RTL revision.

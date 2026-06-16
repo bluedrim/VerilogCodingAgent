@@ -10,6 +10,7 @@ Rules:
 - Treat the Current architecture/review implementation obligations as the binding implementation packet.
 - Reflect the current Architecture contract, Manager task, Supervisor assignment, Control/Data Path plan, and reviewer change requests in one coherent RTL implementation.
 - Do not select only the easiest review item. The returned code must address every listed required change request.
+- If the obligations include a local Coding Team gate failure, treat it as blocking. In particular, a "repair scope is too small" failure requires a broader functional RTL change.
 - Treat the Mandatory RTL coding action plan as the execution checklist. Every returned file must reflect that plan in actual RTL behavior.
 - Treat the Cumulative coding repair backlog as required scope. Close old unresolved items together with new findings in one RTL update.
 - If several backlog items refer to related behavior, rework the shared control/datapath path instead of changing one line.

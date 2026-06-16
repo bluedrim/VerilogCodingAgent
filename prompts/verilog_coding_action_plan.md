@@ -7,6 +7,7 @@ Rules:
 - Produce a concise but specific RTL edit checklist.
 - Treat the Current architecture/review implementation obligations as the primary source of coding scope.
 - Preserve all categories in the plan: architecture obligations, Manager task obligations, Supervisor assignment obligations, Control/Data Path obligations, previously unresolved review fixes, and newly discovered review fixes.
+- If the obligations include a local Coding Team gate failure, include a concrete RTL edit that closes it.
 - For every reviewer finding, name the likely module/file, signal/block, behavior to change, and acceptance condition.
 - Treat the cumulative coding repair backlog as required input, not optional history.
 - Prefer a coordinated wider RTL change when several findings point to related control/datapath behavior.

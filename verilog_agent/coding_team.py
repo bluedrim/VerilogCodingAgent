@@ -36,6 +36,15 @@ IMPLEMENTATION_REVIEW_STAGES = (
 )
 
 
+LOCAL_CODING_GATE_STAGES = {
+    "coding",
+    "coding_repair_contract",
+    "coding_review_gate",
+    "coding_unchanged",
+    "coding_preflight",
+}
+
+
 def _review_feedback_for_coding(state: AgentState, max_chars: int) -> str:
     return render_review_feedback(state, IMPLEMENTATION_REVIEW_STAGES, max_chars)
 
@@ -128,11 +137,36 @@ def _render_targeted_repair_brief(state: AgentState, max_chars: int) -> str:
     return clip_text("\n".join(lines), max_chars)
 
 
+def _render_local_gate_feedback(state: AgentState, max_chars: int) -> str:
+    failed_stage = str(state.get("failed_stage") or "")
+    if failed_stage not in LOCAL_CODING_GATE_STAGES:
+        return "(none)"
+    report = str(
+        state.get("blocking_report")
+        or state.get("error_message")
+        or state.get("verification_report")
+        or ""
+    ).strip()
+    if not report:
+        return "(none)"
+    lines = [
+        "Most recent local Coding Team gate failure:",
+        f"- failed_stage: {failed_stage}",
+        "- This is not external reviewer backlog, but it is a blocking instruction for the next coding retry.",
+        "- The next RTL candidate must directly eliminate this local gate failure.",
+        "- If the failure says the repair scope is too small, make a broader functional control/datapath change rather than another local tweak.",
+        "",
+        report,
+    ]
+    return clip_text("\n".join(lines), max_chars)
+
+
 def _render_implementation_obligation_packet(
     state: AgentState, task: dict, max_chars: int
 ) -> str:
     entries = _coding_feedback_entries(state)
     review_backlog = render_coding_repair_backlog(state, max_chars)
+    local_gate_feedback = _render_local_gate_feedback(state, max_chars)
     chunk_limit = max(800, max_chars // 6)
     lines = [
         "Current architecture/review implementation obligations:",
@@ -160,6 +194,9 @@ def _render_implementation_obligation_packet(
         "",
         "Reviewer-driven RTL change requests to close:",
         review_backlog,
+        "",
+        "Latest local coding gate feedback to close:",
+        local_gate_feedback,
         "",
         "Required implementation response:",
         "- Update the affected modules/files directly; preserve required file names and module interfaces unless a review item requires a change.",
@@ -885,9 +922,15 @@ def _repair_candidate_against_review_gate(
         if not initial_hard_report:
             write_text_artifact(
                 f"logs/{task_id}_review_gate_soft_warning_attempt_{state.get('coding_retry_count', 0) + 1}.md",
-                gate_report + f"\n\nAutomated soft-scope repair failed: {repair_error}\nContinuing to external reviewers.",
+                gate_report
+                + f"\n\nAutomated scope repair failed: {repair_error}\nReturning to Coding Team for a broader RTL revision.",
             )
-            return files, next_messages, ""
+            return (
+                files,
+                next_messages,
+                gate_report
+                + "\n\nAutomated scope repair failed. The next coding retry must make a broader functional RTL change.",
+            )
         return (
             files,
             next_messages,
@@ -907,13 +950,18 @@ def _repair_candidate_against_review_gate(
         write_text_artifact(
             f"logs/{task_id}_review_gate_soft_warning_attempt_{state.get('coding_retry_count', 0) + 1}.md",
             second_soft_report
-            + "\n\nAutomated review-gate repair was attempted. Continuing to external reviewers because only soft repair-scope concerns remain.",
+            + "\n\nAutomated review-gate repair was attempted, but the repair scope is still too small. Returning to Coding Team for a broader RTL revision.",
         )
         write_json_artifact(
             f"logs/{task_id}_review_gate_soft_scope_audit_attempt_{state.get('coding_retry_count', 0) + 1}.json",
             _coding_repair_scope_audit(state, repaired_files),
         )
-        return repaired_files, next_messages, ""
+        return (
+            repaired_files,
+            next_messages,
+            second_soft_report
+            + "\n\nAutomated review-gate repair was attempted but did not make a broad enough functional RTL change.",
+        )
 
     write_json_artifact(
         f"logs/{task_id}_review_gate_repaired_attempt_{state.get('coding_retry_count', 0) + 1}.json",
