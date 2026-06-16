@@ -45,6 +45,15 @@ LOCAL_CODING_GATE_STAGES = {
 }
 
 
+UNCHANGED_GATE_MARKERS = (
+    "identical to the previous candidate",
+    "unchanged files are not accepted",
+    "changed only comments",
+    "whitespace",
+    "formatting after reviewer feedback",
+)
+
+
 def _review_feedback_for_coding(state: AgentState, max_chars: int) -> str:
     return render_review_feedback(state, IMPLEMENTATION_REVIEW_STAGES, max_chars)
 
@@ -157,6 +166,65 @@ def _render_local_gate_feedback(state: AgentState, max_chars: int) -> str:
         "- If the failure says the repair scope is too small, make a broader functional control/datapath change rather than another local tweak.",
         "",
         report,
+    ]
+    return clip_text("\n".join(lines), max_chars)
+
+
+def _is_unchanged_gate_report(report: str) -> bool:
+    lowered = str(report or "").lower()
+    return any(marker in lowered for marker in UNCHANGED_GATE_MARKERS)
+
+
+def _is_anti_stall_mode(state: AgentState) -> bool:
+    if str(state.get("failed_stage") or "") not in LOCAL_CODING_GATE_STAGES:
+        return False
+    report = str(
+        state.get("blocking_report")
+        or state.get("error_message")
+        or state.get("verification_report")
+        or ""
+    )
+    return _is_unchanged_gate_report(report)
+
+
+def _extract_module_headers(files: list[dict[str, str]], max_chars: int) -> str:
+    headers = []
+    module_pattern = re.compile(
+        r"\bmodule\s+([a-zA-Z_][a-zA-Z0-9_$]*)\b(?P<header>.*?);",
+        flags=re.S,
+    )
+    for file_info in files:
+        filename = str(file_info.get("filename", "")).strip()
+        content = _strip_hdl_comments(str(file_info.get("content", "")))
+        for match in module_pattern.finditer(content):
+            header = re.sub(r"\s+", " ", match.group(0)).strip()
+            headers.append(f"- {filename}: {header}")
+    if not headers:
+        return "(no module headers extracted)"
+    return clip_text("\n".join(headers), max_chars)
+
+
+def _render_previous_candidate_for_coding(state: AgentState, max_chars: int) -> str:
+    previous_files = state.get("candidate_files", [])
+    if not _is_anti_stall_mode(state):
+        return render_files_for_prompt(previous_files, max_chars)
+
+    lines = [
+        "ANTI-STALL MODE: previous full RTL body is intentionally withheld.",
+        "Reason: the Coding Team previously returned the same RTL unchanged after reviewer feedback.",
+        "Do not reconstruct by copying the old body. Regenerate the implementation from the architecture/review obligations while preserving required filenames, module names, ports, and parameters.",
+        "",
+        "Required previous file manifest:",
+        _render_previous_candidate_manifest(previous_files),
+        "",
+        "Module/interface reference extracted from previous candidate:",
+        _extract_module_headers(previous_files, max_chars // 2),
+        "",
+        "Minimum anti-stall acceptance:",
+        "- Return every previous candidate file unless the review explicitly allows removal.",
+        "- At least one previous RTL file must contain a functional behavior change.",
+        "- The returned functional hash must differ from the previous candidate.",
+        "- The same unchanged/identical review-gate report must not apply.",
     ]
     return clip_text("\n".join(lines), max_chars)
 
@@ -868,7 +936,11 @@ Raw reviewer feedback:
             "repair_intensity": prompt_payload["repair_intensity"],
             "coding_action_plan": prompt_payload["coding_action_plan"],
             "previous_candidate_rtl": prompt_payload["previous_candidate_rtl"],
-            "current_candidate_rtl": render_files_for_prompt(files, section_limit),
+            "current_candidate_rtl": (
+                _render_previous_candidate_for_coding(state, section_limit)
+                if _is_unchanged_gate_report(gate_report)
+                else render_files_for_prompt(files, section_limit)
+            ),
             "coding_repair_backlog": prompt_payload["coding_repair_backlog"],
             "revision_plan": prompt_payload["revision_plan"],
             "repair_brief": prompt_payload["repair_brief"],
@@ -1190,8 +1262,8 @@ Review-to-code repair contract:
         "previous_candidate_manifest": _render_previous_candidate_manifest(
             state.get("candidate_files", [])
         ),
-        "previous_candidate_rtl": render_files_for_prompt(
-            state.get("candidate_files", []), section_limit
+        "previous_candidate_rtl": _render_previous_candidate_for_coding(
+            state, section_limit
         ),
         "coding_repair_backlog": render_coding_repair_backlog(state, section_limit),
         "revision_plan": revision_plan,
@@ -1357,8 +1429,8 @@ Parser or validation error:
                 "repair_intensity": repair_intensity,
                 "coding_action_plan": coding_action_plan,
                 "coding_repair_backlog": prompt_payload["coding_repair_backlog"],
-                "previous_candidate_rtl": render_files_for_prompt(
-                    state.get("candidate_files", []), section_limit
+                "previous_candidate_rtl": _render_previous_candidate_for_coding(
+                    state, section_limit
                 ),
                 "invalid_output": response.content,
                 "parser_error": str(exc),

@@ -17,6 +17,7 @@ Rules:
 - When reviewer feedback is provided, treat it as a mandatory change request:
   - Modify the previous candidate RTL directly to address every blocking item.
   - Do not return the same files unchanged after a failed review.
+  - If the previous candidate section says ANTI-STALL MODE, the old RTL body was withheld because copying it caused unchanged failures. Regenerate from the obligations and interface reference instead of copying old logic.
   - If a Review-to-code repair contract is provided, return every previous candidate file listed there unless a review item explicitly requires deletion or renaming.
   - Keep fixes local and complete; every returned file must be the full revised file, not a patch.
   - Use the Reviewer fix checklist as the authoritative repair list.

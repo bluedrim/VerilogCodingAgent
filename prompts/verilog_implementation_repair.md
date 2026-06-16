@@ -15,6 +15,7 @@ Rules:
 - Treat the Review-to-code repair contract as mandatory. If it lists previous candidate files, return every listed file as a complete repaired or preserved file.
 - Treat any Verification-to-coding repair packet as a direct coding assignment and implement its Required coding response.
 - Start from the previous candidate RTL. Do not throw it away unless the review requires a structural rewrite.
+- If the previous candidate section says ANTI-STALL MODE, the old RTL body was intentionally withheld because unchanged copying failed review. Preserve required interfaces from the reference, but regenerate the affected implementation logic from the obligations.
 - Preserve module names, ports, parameters, and file names unless a review item explicitly requires a change.
 - Make real RTL behavior changes. Comment-only, whitespace-only, renaming-only, or formatting-only edits are invalid.
 - For every review item, change the relevant control logic, datapath logic, reset behavior, handshake, counter, width handling, or interface behavior so the same review should pass next time.
