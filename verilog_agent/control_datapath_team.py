@@ -205,23 +205,37 @@ Control/Data Path plan:
         print("---CONTROL/DATAPATH REVIEW: PASS---")
         return {
             "control_datapath_review_passed": True,
+            "control_datapath_review_forced_forward": False,
             "control_datapath_review_report": report or "PASS",
             "failed_stage": "",
             "blocking_report": "",
             "messages": [response],
         }
 
-    print("---CONTROL/DATAPATH REVIEW: FAIL---")
+    next_retry_count = state.get("control_datapath_retry_count", 0) + 1
+    force_forward_after = state.get("max_control_datapath_retries", 10)
+    force_forward = bool(force_forward_after and next_retry_count >= force_forward_after)
+    review_report = report or "Control/Data Path plan is incomplete."
+    if force_forward:
+        print("---CONTROL/DATAPATH REVIEW: FORCE-FORWARD THRESHOLD REACHED---")
+        review_report = (
+            "FORCED_FORWARD: Control/Data Path review reached the force-forward threshold. "
+            "Proceeding to Coding with the best available control/datapath plan.\n\n"
+            + review_report
+        )
+    else:
+        print("---CONTROL/DATAPATH REVIEW: FAIL---")
     return {
         "control_datapath_review_passed": False,
-        "control_datapath_review_report": report or "Control/Data Path plan is incomplete.",
-        "control_datapath_retry_count": state.get("control_datapath_retry_count", 0) + 1,
-        "failed_stage": "control_datapath_review",
-        "blocking_report": report or "Control/Data Path plan is incomplete.",
+        "control_datapath_review_forced_forward": force_forward,
+        "control_datapath_review_report": review_report,
+        "control_datapath_retry_count": next_retry_count,
+        "failed_stage": "" if force_forward else "control_datapath_review",
+        "blocking_report": "" if force_forward else review_report,
         "review_feedback_log": append_review_feedback(
             state,
             "control_datapath_review",
-            report or "Control/Data Path plan is incomplete.",
+            review_report,
             task_id,
         ),
         "messages": [response],

@@ -98,21 +98,45 @@ def summary_agent(state: AgentState):
         "active_task_title": active_task.get("title", ""),
         "stage_pass_flags": {
             "architecture_review": state.get("architecture_review_passed", False),
+            "architecture_review_forced_forward": state.get(
+                "architecture_review_forced_forward", False
+            ),
             "supervisor_review": state.get("supervisor_review_passed", False),
             "supervisor_review_forced_forward": state.get(
                 "supervisor_review_forced_forward", False
             ),
             "control_datapath_review": state.get("control_datapath_review_passed", False),
+            "control_datapath_review_forced_forward": state.get(
+                "control_datapath_review_forced_forward", False
+            ),
             "coding_generation": state.get("generation_ok", False),
+            "coding_review_forced_forward": state.get(
+                "coding_review_forced_forward", False
+            ),
             "microarchitecture_review": state.get("microarchitecture_passed", False),
+            "microarchitecture_review_forced_forward": state.get(
+                "microarchitecture_review_forced_forward", False
+            ),
             "verification": state.get("verification_passed", False),
+            "verification_review_forced_forward": state.get(
+                "verification_review_forced_forward", False
+            ),
             "final_lint": state.get("final_lint_passed", False),
+            "final_lint_forced_forward": state.get("final_lint_forced_forward", False),
             "human_approval": state.get("human_approved", False),
         },
         "retry_counts": retry_counts,
         "retry_limits": retry_limits,
-        "stage_retry_limits_enforced": False,
-        "supervisor_review_force_forward_after": state.get("max_supervisor_retries", 0),
+        "stage_retry_limits_enforced": True,
+        "review_force_forward_after": {
+            "architecture": state.get("max_architecture_retries", 0),
+            "supervisor": state.get("max_supervisor_retries", 0),
+            "control_datapath": state.get("max_control_datapath_retries", 0),
+            "coding_local_gate": state.get("max_retries", 0),
+            "microarchitecture": state.get("max_retries", 0),
+            "verification": state.get("max_retries", 0),
+            "final_lint": state.get("max_testbench_retries", 0),
+        },
         "last_reports": {
             "architecture": state.get("architecture_review_report", ""),
             "supervisor": state.get("supervisor_review_report", ""),
@@ -148,12 +172,21 @@ def summary_agent(state: AgentState):
         ),
         "architecture_contract_saved": str(ARTIFACT_DIR / "architecture_contract.md"),
         "last_architecture_review_report": state.get("architecture_review_report", ""),
+        "architecture_review_forced_forward": state.get(
+            "architecture_review_forced_forward", False
+        ),
         "last_supervisor_review_report": state.get("supervisor_review_report", ""),
         "supervisor_review_forced_forward": state.get(
             "supervisor_review_forced_forward", False
         ),
         "control_datapath_plans_saved": str(ARTIFACT_DIR / "logs"),
+        "control_datapath_review_forced_forward": state.get(
+            "control_datapath_review_forced_forward", False
+        ),
         "last_microarchitecture_report": state.get("microarchitecture_report", ""),
+        "microarchitecture_review_forced_forward": state.get(
+            "microarchitecture_review_forced_forward", False
+        ),
         "rtl_files": [file_info["filename"] for file_info in state.get("final_files", [])],
         "testbench_files": [
             file_info["filename"] for file_info in state.get("testbench_files", [])
@@ -163,6 +196,10 @@ def summary_agent(state: AgentState):
         "top_module_candidates": state.get("top_module_candidates", []),
         "human_approved": state.get("human_approved", False),
         "last_verification_report": state.get("verification_report", ""),
+        "verification_review_forced_forward": state.get(
+            "verification_review_forced_forward", False
+        ),
+        "coding_review_forced_forward": state.get("coding_review_forced_forward", False),
         "last_lint_report": state.get("lint_report", ""),
         "lint_tool": discover_lint_tool(),
         "require_lint": state.get("require_lint", False),
@@ -174,11 +211,20 @@ def summary_agent(state: AgentState):
         "max_user_request_chars": state.get("max_user_request_chars", 0),
         "max_manager_tasks": state.get("max_manager_tasks", 0),
         "final_lint_passed": state.get("final_lint_passed", False),
+        "final_lint_forced_forward": state.get("final_lint_forced_forward", False),
         "final_lint_report": state.get("final_lint_report", ""),
         "retry_counts": retry_counts,
         "retry_limits": retry_limits,
-        "stage_retry_limits_enforced": False,
-        "supervisor_review_force_forward_after": state.get("max_supervisor_retries", 0),
+        "stage_retry_limits_enforced": True,
+        "review_force_forward_after": {
+            "architecture": state.get("max_architecture_retries", 0),
+            "supervisor": state.get("max_supervisor_retries", 0),
+            "control_datapath": state.get("max_control_datapath_retries", 0),
+            "coding_local_gate": state.get("max_retries", 0),
+            "microarchitecture": state.get("max_retries", 0),
+            "verification": state.get("max_retries", 0),
+            "final_lint": state.get("max_testbench_retries", 0),
+        },
         "logs_dir": str(ARTIFACT_DIR / "logs"),
         "failed_attempts_dir": str(ARTIFACT_DIR / "failed_attempts"),
     }

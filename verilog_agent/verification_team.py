@@ -96,13 +96,25 @@ def verification_team_agent(state: AgentState):
             f"logs/{task_id}_verification_repair_packet_attempt_{state.get('verification_retry_count', 0) + 1}.md",
             repair_packet,
         )
-        print("---VERIFICATION TEAM: BASIC SANITY FAIL---")
+        next_retry_count = state.get("verification_retry_count", 0) + 1
+        force_forward_after = state.get("max_retries", 10)
+        force_forward = bool(force_forward_after and next_retry_count >= force_forward_after)
+        if force_forward:
+            print("---VERIFICATION TEAM: FORCE-FORWARD THRESHOLD REACHED AFTER BASIC SANITY FAIL---")
+            repair_packet = (
+                "FORCED_FORWARD: Verification sanity review reached the force-forward threshold. "
+                "Accepting the best available RTL candidate for this task.\n\n"
+                + repair_packet
+            )
+        else:
+            print("---VERIFICATION TEAM: BASIC SANITY FAIL---")
         return {
             "verification_passed": False,
+            "verification_review_forced_forward": force_forward,
             "verification_report": repair_packet,
-            "verification_retry_count": state.get("verification_retry_count", 0) + 1,
-            "failed_stage": "verification",
-            "blocking_report": repair_packet,
+            "verification_retry_count": next_retry_count,
+            "failed_stage": "" if force_forward else "verification",
+            "blocking_report": "" if force_forward else repair_packet,
             "review_feedback_log": append_review_feedback(state, "verification", repair_packet, task_id),
         }
 
@@ -133,14 +145,26 @@ def verification_team_agent(state: AgentState):
             f"logs/{task_id}_verification_repair_packet_attempt_{state.get('verification_retry_count', 0) + 1}.md",
             repair_packet,
         )
-        print("---VERIFICATION TEAM: LINT FAIL---")
+        next_retry_count = state.get("verification_retry_count", 0) + 1
+        force_forward_after = state.get("max_retries", 10)
+        force_forward = bool(force_forward_after and next_retry_count >= force_forward_after)
+        if force_forward:
+            print("---VERIFICATION TEAM: FORCE-FORWARD THRESHOLD REACHED AFTER LINT FAIL---")
+            repair_packet = (
+                "FORCED_FORWARD: Verification lint review reached the force-forward threshold. "
+                "Accepting the best available RTL candidate for this task.\n\n"
+                + repair_packet
+            )
+        else:
+            print("---VERIFICATION TEAM: LINT FAIL---")
         return {
             "verification_passed": False,
+            "verification_review_forced_forward": force_forward,
             "verification_report": repair_packet,
             "lint_report": lint_result["report"],
-            "verification_retry_count": state.get("verification_retry_count", 0) + 1,
-            "failed_stage": "verification_lint",
-            "blocking_report": repair_packet,
+            "verification_retry_count": next_retry_count,
+            "failed_stage": "" if force_forward else "verification_lint",
+            "blocking_report": "" if force_forward else repair_packet,
             "review_feedback_log": append_review_feedback(
                 state, "verification_lint", repair_packet, task_id
             ),
@@ -231,6 +255,7 @@ RTL candidate to verify:
         )
         return {
             "verification_passed": True,
+            "verification_review_forced_forward": False,
             "verification_report": report or "PASS",
             "lint_report": lint_result["report"],
             "failed_stage": "",
@@ -255,13 +280,24 @@ RTL candidate to verify:
         f"logs/{task_id}_verification_repair_packet_attempt_{state.get('verification_retry_count', 0) + 1}.md",
         repair_packet,
     )
+    next_retry_count = state.get("verification_retry_count", 0) + 1
+    force_forward_after = state.get("max_retries", 10)
+    force_forward = bool(force_forward_after and next_retry_count >= force_forward_after)
+    if force_forward:
+        print("---VERIFICATION TEAM: FORCE-FORWARD THRESHOLD REACHED---")
+        repair_packet = (
+            "FORCED_FORWARD: Verification review reached the force-forward threshold. "
+            "Accepting the best available RTL candidate for this task.\n\n"
+            + repair_packet
+        )
     return {
         "verification_passed": False,
+        "verification_review_forced_forward": force_forward,
         "verification_report": repair_packet,
         "lint_report": lint_result["report"],
-        "verification_retry_count": state.get("verification_retry_count", 0) + 1,
-        "failed_stage": "verification",
-        "blocking_report": repair_packet,
+        "verification_retry_count": next_retry_count,
+        "failed_stage": "" if force_forward else "verification",
+        "blocking_report": "" if force_forward else repair_packet,
         "review_feedback_log": append_review_feedback(
             state,
             "verification",

@@ -35,15 +35,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=positive_int,
         default=10,
         help=(
-            "Legacy/advisory retry threshold recorded in logs for coding, "
-            "microarchitecture review, and verification. It no longer stops retry loops."
+            "Force-forward threshold for coding local review gates, "
+            "microarchitecture review, and verification. Set 0 to disable force-forward."
         ),
     )
     parser.add_argument(
         "--max-architecture-retries",
         type=positive_int,
         default=10,
-        help="Legacy/advisory architecture retry threshold. It no longer stops retry loops.",
+        help=(
+            "Architecture review force-forward threshold. At this count the run proceeds "
+            "to Supervisor with the best available architecture. Set 0 to disable force-forward."
+        ),
     )
     parser.add_argument(
         "--max-supervisor-retries",
@@ -58,13 +61,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--max-control-datapath-retries",
         type=positive_int,
         default=10,
-        help="Legacy/advisory Control/Data Path retry threshold. It no longer stops retry loops.",
+        help=(
+            "Control/Data Path review force-forward threshold. At this count the run proceeds "
+            "to Coding with the best available plan. Set 0 to disable force-forward."
+        ),
     )
     parser.add_argument(
         "--max-testbench-retries",
         type=positive_int,
         default=10,
-        help="Legacy/advisory testbench retry threshold. It no longer stops retry loops.",
+        help=(
+            "Final lint force-forward threshold after testbench repair attempts. "
+            "At this count the run proceeds to final review. Set 0 to disable force-forward."
+        ),
     )
     parser.add_argument(
         "--graph-recursion-limit",
@@ -202,6 +211,7 @@ class AgentState(TypedDict):
     architecture_contract: str
     architecture_review_passed: bool
     architecture_review_report: str
+    architecture_review_forced_forward: bool
     architecture_retry_count: int
     max_architecture_retries: int
     current_task_index: int
@@ -214,9 +224,11 @@ class AgentState(TypedDict):
     control_datapath_plan: str
     control_datapath_review_passed: bool
     control_datapath_review_report: str
+    control_datapath_review_forced_forward: bool
     control_datapath_retry_count: int
     max_control_datapath_retries: int
     microarchitecture_passed: bool
+    microarchitecture_review_forced_forward: bool
     microarchitecture_report: str
     coding_retry_count: int
     microarchitecture_retry_count: int
@@ -229,6 +241,7 @@ class AgentState(TypedDict):
     testbench_files: List[Dict[str, str]]
     top_module_candidates: List[str]
     verification_passed: bool
+    verification_review_forced_forward: bool
     verification_report: str
     lint_report: str
     require_lint: bool
@@ -236,6 +249,7 @@ class AgentState(TypedDict):
     llm_timeout_seconds: int
     allow_blackboxes: bool
     final_lint_passed: bool
+    final_lint_forced_forward: bool
     final_lint_report: str
     writer_results: List[str]
     writer_errors: List[str]
@@ -255,6 +269,7 @@ class AgentState(TypedDict):
     fail_on_manager_fallback: bool
     run_id: str
     generation_ok: bool
+    coding_review_forced_forward: bool
     error_message: str
 
 
@@ -1811,14 +1826,17 @@ agent_runtime.bind(sys.modules[__name__])
 def coding_condition(state: AgentState):
     if state.get("generation_ok"):
         return "microarch_review"
-    print("---CONDITION: Coding attempt needs repair. Retrying without a stage retry cap.---")
+    if state.get("coding_review_forced_forward"):
+        print("---CONDITION: Coding local review force-forward threshold reached. Continuing to Microarchitecture review with best available RTL candidate.---")
+        return "microarch_review"
+    print("---CONDITION: Coding attempt needs repair. Retrying.---")
     return "retry"
 
 
 def architecture_review_condition(state: AgentState):
-    if state.get("architecture_review_passed"):
+    if state.get("architecture_review_passed") or state.get("architecture_review_forced_forward"):
         return "supervisor"
-    print("---CONDITION: Architecture review failed. Retrying without a stage retry cap.---")
+    print("---CONDITION: Architecture review failed. Retrying.---")
     return "retry"
 
 
@@ -1836,7 +1854,7 @@ def supervisor_review_condition(state: AgentState):
     if force_forward_after and state.get("supervisor_retry_count", 0) >= force_forward_after:
         print("---CONDITION: Supervisor review force-forward threshold reached. Continuing to Control/Data Path planning with best available packet.---")
         return "control_datapath"
-    print("---CONDITION: Supervisor review failed. Retrying without a failure cap.---")
+    print("---CONDITION: Supervisor review failed. Retrying until force-forward threshold.---")
     return "retry"
 
 
@@ -1848,9 +1866,9 @@ def supervisor_generation_condition(state: AgentState):
 
 
 def control_datapath_review_condition(state: AgentState):
-    if state.get("control_datapath_review_passed"):
+    if state.get("control_datapath_review_passed") or state.get("control_datapath_review_forced_forward"):
         return "coding"
-    print("---CONDITION: Control/Data Path review failed. Retrying without a stage retry cap.---")
+    print("---CONDITION: Control/Data Path review failed. Retrying.---")
     return "retry"
 
 
@@ -1862,16 +1880,16 @@ def control_datapath_generation_condition(state: AgentState):
 
 
 def microarchitecture_condition(state: AgentState):
-    if state.get("microarchitecture_passed"):
+    if state.get("microarchitecture_passed") or state.get("microarchitecture_review_forced_forward"):
         return "verify"
-    print("---CONDITION: Microarchitecture review failed. Returning to Coding Team without a stage retry cap.---")
+    print("---CONDITION: Microarchitecture review failed. Returning to Coding Team.---")
     return "retry"
 
 
 def verification_condition(state: AgentState):
-    if state.get("verification_passed"):
+    if state.get("verification_passed") or state.get("verification_review_forced_forward"):
         return "accept"
-    print("---CONDITION: Verification failed. Returning to Coding Team without a stage retry cap.---")
+    print("---CONDITION: Verification failed. Returning to Coding Team.---")
     return "retry"
 
 
@@ -1891,12 +1909,12 @@ def testbench_condition(state: AgentState):
 
 
 def final_lint_condition(state: AgentState):
-    if state.get("final_lint_passed"):
+    if state.get("final_lint_passed") or state.get("final_lint_forced_forward"):
         return "review"
     if state.get("skip_testbench"):
         print("---CONDITION: Final lint failed with testbench disabled. Failing run before writer.---")
         return "fail"
-    print("---CONDITION: Final lint failed. Returning to Testbench Team with lint feedback without a stage retry cap.---")
+    print("---CONDITION: Final lint failed. Returning to Testbench Team with lint feedback until force-forward threshold.---")
     return "retry"
 
 
@@ -2074,8 +2092,16 @@ if __name__ == "__main__":
             "verification": args.max_retries,
             "testbench": args.max_testbench_retries,
         },
-        "stage_retry_limits_enforced": False,
-        "supervisor_review_force_forward_after": args.max_supervisor_retries,
+        "stage_retry_limits_enforced": True,
+        "review_force_forward_after": {
+            "architecture": args.max_architecture_retries,
+            "supervisor": args.max_supervisor_retries,
+            "control_datapath": args.max_control_datapath_retries,
+            "coding_local_gate": args.max_retries,
+            "microarchitecture": args.max_retries,
+            "verification": args.max_retries,
+            "final_lint": args.max_testbench_retries,
+        },
         "llm_config": active_llm_config,
         "llm_timeout_seconds": args.llm_timeout
         if args.llm_timeout is not None
@@ -2097,6 +2123,7 @@ if __name__ == "__main__":
         "architecture_contract": "",
         "architecture_review_passed": False,
         "architecture_review_report": "",
+        "architecture_review_forced_forward": False,
         "architecture_retry_count": 0,
         "max_architecture_retries": args.max_architecture_retries,
         "current_task_index": 0,
@@ -2109,9 +2136,11 @@ if __name__ == "__main__":
         "control_datapath_plan": "",
         "control_datapath_review_passed": False,
         "control_datapath_review_report": "",
+        "control_datapath_review_forced_forward": False,
         "control_datapath_retry_count": 0,
         "max_control_datapath_retries": args.max_control_datapath_retries,
         "microarchitecture_passed": False,
+        "microarchitecture_review_forced_forward": False,
         "microarchitecture_report": "",
         "coding_retry_count": 0,
         "microarchitecture_retry_count": 0,
@@ -2124,6 +2153,7 @@ if __name__ == "__main__":
         "testbench_files": [],
         "top_module_candidates": [],
         "verification_passed": False,
+        "verification_review_forced_forward": False,
         "verification_report": "",
         "lint_report": "",
         "require_lint": args.require_lint,
@@ -2133,6 +2163,7 @@ if __name__ == "__main__":
         if args.llm_timeout is not None
         else int(os.getenv("LLM_TIMEOUT_SECONDS", "180")),
         "final_lint_passed": False,
+        "final_lint_forced_forward": False,
         "final_lint_report": "",
         "writer_results": [],
         "writer_errors": [],
@@ -2151,6 +2182,7 @@ if __name__ == "__main__":
         "manager_fallback_used": False,
         "fail_on_manager_fallback": args.fail_on_manager_fallback,
         "generation_ok": False,
+        "coding_review_forced_forward": False,
         "error_message": "",
     }
     try:

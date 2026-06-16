@@ -175,21 +175,35 @@ Architecture contract:
         print("---ARCHITECTURE REVIEW: PASS---")
         return {
             "architecture_review_passed": True,
+            "architecture_review_forced_forward": False,
             "architecture_review_report": report or "PASS",
             "failed_stage": "",
             "blocking_report": "",
             "messages": [response],
         }
 
-    print("---ARCHITECTURE REVIEW: FAIL---")
+    next_retry_count = state.get("architecture_retry_count", 0) + 1
+    force_forward_after = state.get("max_architecture_retries", 10)
+    force_forward = bool(force_forward_after and next_retry_count >= force_forward_after)
+    review_report = report or "Architecture contract is incomplete."
+    if force_forward:
+        print("---ARCHITECTURE REVIEW: FORCE-FORWARD THRESHOLD REACHED---")
+        review_report = (
+            "FORCED_FORWARD: Architecture review reached the force-forward threshold. "
+            "Proceeding to Supervisor with the best available architecture contract.\n\n"
+            + review_report
+        )
+    else:
+        print("---ARCHITECTURE REVIEW: FAIL---")
     return {
         "architecture_review_passed": False,
-        "architecture_review_report": report or "Architecture contract is incomplete.",
-        "architecture_retry_count": state.get("architecture_retry_count", 0) + 1,
-        "failed_stage": "architecture_review",
-        "blocking_report": report or "Architecture contract is incomplete.",
+        "architecture_review_forced_forward": force_forward,
+        "architecture_review_report": review_report,
+        "architecture_retry_count": next_retry_count,
+        "failed_stage": "" if force_forward else "architecture_review",
+        "blocking_report": "" if force_forward else review_report,
         "review_feedback_log": append_review_feedback(
-            state, "architecture_review", report or "Architecture contract is incomplete."
+            state, "architecture_review", review_report
         ),
         "messages": [response],
     }

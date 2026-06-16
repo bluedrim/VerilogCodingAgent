@@ -719,14 +719,19 @@ def _reject_incomplete_review_repair(
         f"failed_attempts/{task_id}_incomplete_review_repair_attempt_{attempt}.txt",
         render_files(files) + "\n\n" + report,
     )
+    force_forward = bool(state.get("max_retries", 10) and attempt >= state.get("max_retries", 10))
+    if force_forward:
+        print("---VERILOG CODING TEAM: LOCAL REVIEW FORCE-FORWARD THRESHOLD REACHED---")
     return {
+        "candidate_files": files,
         "generation_ok": False,
+        "coding_review_forced_forward": force_forward,
         "microarchitecture_passed": False,
         "verification_passed": False,
         "verification_report": report,
         "coding_retry_count": attempt,
-        "failed_stage": "coding_repair_contract",
-        "blocking_report": report,
+        "failed_stage": "" if force_forward else "coding_repair_contract",
+        "blocking_report": "" if force_forward else report,
         "messages": messages,
         "error_message": report,
         "review_feedback_log": append_review_feedback(
@@ -750,14 +755,19 @@ def _reject_unchanged_candidate(
         f"failed_attempts/{task_id}_unchanged_after_review_attempt_{attempt}.txt",
         render_files(files) + "\n\n" + report,
     )
+    force_forward = bool(state.get("max_retries", 10) and attempt >= state.get("max_retries", 10))
+    if force_forward:
+        print("---VERILOG CODING TEAM: LOCAL REVIEW FORCE-FORWARD THRESHOLD REACHED---")
     return {
+        "candidate_files": files,
         "generation_ok": False,
+        "coding_review_forced_forward": force_forward,
         "microarchitecture_passed": False,
         "verification_passed": False,
         "verification_report": report,
         "coding_retry_count": attempt,
-        "failed_stage": "coding_unchanged",
-        "blocking_report": report,
+        "failed_stage": "" if force_forward else "coding_unchanged",
+        "blocking_report": "" if force_forward else report,
         "messages": messages,
         "error_message": report,
         "review_feedback_log": append_review_feedback(
@@ -852,14 +862,19 @@ def _reject_review_gate_failure(
         f"failed_attempts/{task_id}_review_gate_failed_attempt_{attempt}.txt",
         render_files(files) + "\n\n" + report,
     )
+    force_forward = bool(state.get("max_retries", 10) and attempt >= state.get("max_retries", 10))
+    if force_forward:
+        print("---VERILOG CODING TEAM: LOCAL REVIEW FORCE-FORWARD THRESHOLD REACHED---")
     return {
+        "candidate_files": files,
         "generation_ok": False,
+        "coding_review_forced_forward": force_forward,
         "microarchitecture_passed": False,
         "verification_passed": False,
         "verification_report": report,
         "coding_retry_count": attempt,
-        "failed_stage": "coding_review_gate",
-        "blocking_report": report,
+        "failed_stage": "" if force_forward else "coding_review_gate",
+        "blocking_report": "" if force_forward else report,
         "messages": messages,
         "error_message": report,
         "review_feedback_log": append_review_feedback(
@@ -1113,14 +1128,19 @@ def _reject_failed_preflight(
         f"failed_attempts/{task_id}_coding_preflight_failed_attempt_{attempt}.txt",
         render_files(files) + "\n\n" + report,
     )
+    force_forward = bool(state.get("max_retries", 10) and attempt >= state.get("max_retries", 10))
+    if force_forward:
+        print("---VERILOG CODING TEAM: LOCAL REVIEW FORCE-FORWARD THRESHOLD REACHED---")
     return {
+        "candidate_files": files,
         "generation_ok": False,
+        "coding_review_forced_forward": force_forward,
         "microarchitecture_passed": False,
         "verification_passed": False,
         "verification_report": report,
         "coding_retry_count": attempt,
-        "failed_stage": "coding_preflight",
-        "blocking_report": report,
+        "failed_stage": "" if force_forward else "coding_preflight",
+        "blocking_report": "" if force_forward else report,
         "messages": messages,
         "error_message": report,
         "review_feedback_log": append_review_feedback(
@@ -1418,6 +1438,7 @@ Review-to-code repair contract:
         return {
             "candidate_files": files,
             "generation_ok": True,
+            "coding_review_forced_forward": False,
             "microarchitecture_passed": False,
             "messages": accepted_messages,
             "failed_stage": "",
@@ -1555,6 +1576,7 @@ Parser or validation error:
             return {
                 "candidate_files": files,
                 "generation_ok": True,
+                "coding_review_forced_forward": False,
                 "microarchitecture_passed": False,
                 "messages": accepted_messages,
                 "failed_stage": "",
@@ -1581,6 +1603,7 @@ Parser or validation error:
     )
     return {
         "generation_ok": False,
+        "coding_review_forced_forward": False,
         "microarchitecture_passed": False,
         "verification_passed": False,
         "verification_report": report,
@@ -1698,13 +1721,13 @@ RTL candidate:
         print("---MICROARCH REVIEWER: PASS---")
         return {
             "microarchitecture_passed": True,
+            "microarchitecture_review_forced_forward": False,
             "microarchitecture_report": report or "PASS",
             "failed_stage": "",
             "blocking_report": "",
             "messages": [response],
         }
 
-    print("---MICROARCH REVIEWER: FAIL---")
     repair_packet = _render_microarchitecture_repair_packet(
         state,
         task_id,
@@ -1715,12 +1738,25 @@ RTL candidate:
         f"failed_attempts/{task_id}_microarchitecture_failed_attempt_{state.get('microarchitecture_retry_count', 0) + 1}.txt",
         render_files(state.get("candidate_files", [])) + "\n\n" + repair_packet,
     )
+    next_retry_count = state.get("microarchitecture_retry_count", 0) + 1
+    force_forward_after = state.get("max_retries", 10)
+    force_forward = bool(force_forward_after and next_retry_count >= force_forward_after)
+    if force_forward:
+        print("---MICROARCH REVIEWER: FORCE-FORWARD THRESHOLD REACHED---")
+        repair_packet = (
+            "FORCED_FORWARD: Microarchitecture review reached the force-forward threshold. "
+            "Proceeding to Verification with the best available RTL candidate.\n\n"
+            + repair_packet
+        )
+    else:
+        print("---MICROARCH REVIEWER: FAIL---")
     return {
         "microarchitecture_passed": False,
+        "microarchitecture_review_forced_forward": force_forward,
         "microarchitecture_report": repair_packet,
-        "microarchitecture_retry_count": state.get("microarchitecture_retry_count", 0) + 1,
-        "failed_stage": "microarchitecture_review",
-        "blocking_report": repair_packet,
+        "microarchitecture_retry_count": next_retry_count,
+        "failed_stage": "" if force_forward else "microarchitecture_review",
+        "blocking_report": "" if force_forward else repair_packet,
         "review_feedback_log": append_review_feedback(
             state,
             "microarchitecture_review",

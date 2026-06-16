@@ -197,18 +197,31 @@ def final_lint_agent(state: AgentState):
     if lint_result["passed"]:
         return {
             "final_lint_passed": True,
+            "final_lint_forced_forward": False,
             "final_lint_report": lint_result["report"],
             "failed_stage": "",
             "blocking_report": "",
         }
+    next_retry_count = state.get("testbench_retry_count", 0) + 1
+    force_forward_after = state.get("max_testbench_retries", 10)
+    force_forward = bool(force_forward_after and next_retry_count >= force_forward_after)
+    report = lint_result["report"]
+    if force_forward:
+        print("---FINAL LINT: FORCE-FORWARD THRESHOLD REACHED---")
+        report = (
+            "FORCED_FORWARD: Final lint reached the force-forward threshold. "
+            "Proceeding to final review with the best available RTL/testbench files.\n\n"
+            + report
+        )
     return {
         "final_lint_passed": False,
-        "final_lint_report": lint_result["report"],
+        "final_lint_forced_forward": force_forward,
+        "final_lint_report": report,
         "generation_ok": False,
-        "testbench_retry_count": state.get("testbench_retry_count", 0) + 1,
-        "failed_stage": "final_lint",
-        "blocking_report": lint_result["report"],
+        "testbench_retry_count": next_retry_count,
+        "failed_stage": "" if force_forward else "final_lint",
+        "blocking_report": "" if force_forward else report,
         "review_feedback_log": append_review_feedback(
-            state, "final_lint", lint_result["report"], "testbench"
+            state, "final_lint", report, "testbench"
         ),
     }
