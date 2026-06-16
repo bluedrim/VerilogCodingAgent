@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import difflib
 import hashlib
 import json
 import re
@@ -609,17 +608,6 @@ def _functional_file_hashes(files: list[dict[str, str]]) -> dict[str, str]:
     return hashes
 
 
-def _functional_compare_text(files: list[dict[str, str]]) -> str:
-    chunks = []
-    for file_info in sorted(files, key=lambda item: item.get("filename", "")):
-        filename = str(file_info.get("filename", "")).strip()
-        content = str(file_info.get("content", ""))
-        stripped = _strip_hdl_comments(content)
-        normalized = re.sub(r"\s+", " ", stripped).strip()
-        chunks.append(f"FILE {filename}\n{normalized}")
-    return "\n".join(chunks)
-
-
 def _review_repair_delta_report(state: AgentState, files: list[dict[str, str]]) -> str:
     if not _use_review_driven_repair(state):
         return ""
@@ -634,16 +622,6 @@ def _review_repair_delta_report(state: AgentState, files: list[dict[str, str]]) 
         return ""
 
     previous_files = state.get("candidate_files", [])
-    previous_text = _functional_compare_text(state.get("candidate_files", []))
-    current_text = _functional_compare_text(files)
-    if not previous_text or not current_text:
-        return ""
-
-    ratio = difflib.SequenceMatcher(
-        None, previous_text, current_text, autojunk=False
-    ).ratio()
-    max_len = max(len(previous_text), len(current_text), 1)
-    changed_chars = int(max_len * (1.0 - ratio))
     previous_hashes = _functional_file_hashes(previous_files)
     current_hashes = _functional_file_hashes(files)
     changed_files = sorted(
@@ -653,18 +631,7 @@ def _review_repair_delta_report(state: AgentState, files: list[dict[str, str]]) 
     )
     previous_file_count = len(previous_hashes)
 
-    if attempts >= 10 or backlog_count >= 5:
-        threshold = min(max(160, int(max_len * 0.10)), 1600)
-    elif attempts >= 6 or backlog_count >= 3:
-        threshold = min(max(120, int(max_len * 0.07)), 1000)
-    else:
-        threshold = min(max(80, int(max_len * 0.05)), 800)
-
     scope_issues = []
-    if changed_chars < threshold:
-        scope_issues.append(
-            f"estimated changed functional characters: {changed_chars}; required at least {threshold}"
-        )
     if (
         previous_file_count >= 2
         and backlog_count >= 3
@@ -855,27 +822,16 @@ def _coding_repair_scope_audit(state: AgentState, files: list[dict[str, str]]) -
     )
     new_files = sorted(name for name in current_hashes if name not in previous_hashes)
     removed_files = sorted(name for name in previous_hashes if name not in current_hashes)
-    previous_text = _functional_compare_text(previous_files)
-    current_text = _functional_compare_text(files)
-    if previous_text and current_text:
-        ratio = difflib.SequenceMatcher(
-            None, previous_text, current_text, autojunk=False
-        ).ratio()
-        max_len = max(len(previous_text), len(current_text), 1)
-        changed_chars = int(max_len * (1.0 - ratio))
-    else:
-        ratio = 0.0 if current_text else 1.0
-        changed_chars = len(current_text)
     return {
         "backlog_count": _coding_backlog_count(state),
         "repair_intensity": _coding_repair_intensity(state),
         "previous_file_count": len(previous_hashes),
         "current_file_count": len(current_hashes),
         "changed_files": changed_files,
+        "changed_previous_file_count": len(changed_files),
         "new_files": new_files,
         "removed_files": removed_files,
-        "functional_similarity_ratio": ratio,
-        "estimated_changed_functional_chars": changed_chars,
+        "functional_change_detected": bool(changed_files or new_files or removed_files),
     }
 
 
