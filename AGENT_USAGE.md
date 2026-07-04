@@ -73,8 +73,7 @@ python3 dashboard.py --port 8766 --root .
 ## OpenAI account run
 
 Use `openai` when you want the agent to call models through your OpenAI account API key.
-The Codex app login token is not read by this script; provide an API key through
-`OPENAI_API_KEY`, `.env`, or `--llm-api-key`.
+Provide an API key through `OPENAI_API_KEY`, `.env`, or `--llm-api-key`.
 
 ```bash
 python3 main.py \
@@ -91,30 +90,6 @@ python3 main.py \
 LLM_PROVIDER=openai
 OPENAI_MODEL=gpt-4.1
 OPENAI_API_KEY=YOUR_OPENAI_API_KEY
-LLM_TEMPERATURE=0.1
-```
-
-## Codex run
-
-Use `codex` when you want the agent to use a Codex-targeted OpenAI-compatible
-chat model configuration. Provide a model and API key through `.env`,
-environment variables, or command-line arguments.
-
-```bash
-python3 main.py \
-  --llm-provider codex \
-  --llm-model gpt-5-codex \
-  --llm-api-key YOUR_CODEX_OR_OPENAI_API_KEY \
-  --spec spec.txt \
-  --auto-approve
-```
-
-`.env` example:
-
-```bash
-LLM_PROVIDER=codex
-CODEX_MODEL=gpt-5-codex
-CODEX_API_KEY=YOUR_CODEX_OR_OPENAI_API_KEY
 LLM_TEMPERATURE=0.1
 ```
 
@@ -178,11 +153,11 @@ Options:
 - `--max-manager-tasks`: Maximum number of Manager tasks accepted from planning.
 - `--fail-on-manager-fallback`: Fail instead of using the single-task fallback when Manager planning output is invalid.
 - `--artifact-dir`: Directory for generated artifacts and logs.
-- `--llm-provider`: `ollama`, `gpt-oss`, `openai`, or `codex`.
-- `--llm-model`: Model name such as `gpt-5-codex`, `gpt-4.1`, `gpt-oss`, `gpt-oss:20b`, `gpt-oss:120b`, or another Ollama model.
+- `--llm-provider`: `ollama`, `gpt-oss`, or `openai`.
+- `--llm-model`: Model name such as `gpt-4.1`, `gpt-oss`, `gpt-oss:20b`, `gpt-oss:120b`, or another Ollama model.
 - `--llm-temperature`: Model temperature.
 - `--llm-api-url`: OpenAI-compatible chat completions URL.
-- `--llm-api-key`: API key for Codex, OpenAI, or the remote endpoint. The saved config redacts it.
+- `--llm-api-key`: API key for OpenAI or the remote endpoint. The saved config redacts it.
 
 ## Agent prompts
 

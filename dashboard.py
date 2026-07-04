@@ -383,7 +383,6 @@ HTML = r"""<!doctype html>
                   <option value="ollama">ollama</option>
                   <option value="gpt-oss">gpt-oss</option>
                   <option value="openai">openai</option>
-                  <option value="codex">codex</option>
                 </select>
               </div>
             </div>
