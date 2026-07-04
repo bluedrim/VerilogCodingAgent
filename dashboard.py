@@ -6,15 +6,24 @@ import json
 import mimetypes
 import os
 import re
+import subprocess
+import sys
 from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, quote, unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
+
+try:
+    from dotenv import load_dotenv
+except ModuleNotFoundError:  # pragma: no cover - dashboard still works without .env loading
+    load_dotenv = None
 
 
 ROOT = Path(__file__).resolve().parent
 MAX_FILE_PREVIEW_BYTES = 1_000_000
+MAX_START_PAYLOAD_BYTES = 1_000_000
+MAX_SPEC_CHARS = 500_000
 
 
 HTML = r"""<!doctype html>
@@ -86,6 +95,57 @@ HTML = r"""<!doctype html>
       align-items: center;
       gap: 8px;
       flex-wrap: wrap;
+    }
+    .launch-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.4fr) minmax(320px, 0.6fr);
+      gap: 12px;
+      margin-bottom: 14px;
+    }
+    .launch-grid textarea,
+    .launch-grid input {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 8px 10px;
+      font: inherit;
+      color: var(--ink);
+      background: #fff;
+    }
+    .launch-grid textarea {
+      min-height: 150px;
+      resize: vertical;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 12px;
+      line-height: 1.45;
+    }
+    .field {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+      margin-bottom: 9px;
+    }
+    .field label {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .option-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr);
+      gap: 8px;
+    }
+    .launch-actions {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    .status-line {
+      color: var(--muted);
+      font-size: 12px;
+      min-height: 18px;
+      overflow-wrap: anywhere;
     }
     .grid {
       display: grid;
@@ -276,7 +336,7 @@ HTML = r"""<!doctype html>
     }
     @media (max-width: 980px) {
       header { align-items: flex-start; flex-direction: column; }
-      .grid, .two-col, .lists, .report-grid { grid-template-columns: 1fr; }
+      .grid, .two-col, .lists, .report-grid, .launch-grid { grid-template-columns: 1fr; }
       .pipeline { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     }
     @media (max-width: 560px) {
@@ -300,6 +360,44 @@ HTML = r"""<!doctype html>
     </div>
   </header>
   <main>
+    <section class="panel" style="margin-bottom:14px;">
+      <h2>Start Agent Run</h2>
+      <form id="startForm">
+        <div class="launch-grid">
+          <div>
+            <div class="field">
+              <label for="specText">Requirement or Markdown content</label>
+              <textarea id="specText" placeholder="Describe the RTL requirement here, or choose a .md file below."></textarea>
+            </div>
+            <div class="field">
+              <label for="specFile">Markdown input file</label>
+              <input id="specFile" type="file" accept=".md,.markdown,.txt,text/markdown,text/plain" />
+            </div>
+          </div>
+          <div>
+            <div class="option-row">
+              <div class="field">
+                <label for="llmProvider">LLM provider</label>
+                <select id="llmProvider">
+                  <option value="">Default</option>
+                  <option value="ollama">ollama</option>
+                  <option value="gpt-oss">gpt-oss</option>
+                  <option value="openai">openai</option>
+                  <option value="codex">codex</option>
+                </select>
+              </div>
+            </div>
+            <div class="status-line">
+              Model, API, retry, lint, and testbench options are read from .env or environment variables.
+            </div>
+            <div class="launch-actions">
+              <button id="startBtn" type="submit">Start Run</button>
+              <span id="startStatus" class="status-line">Ready.</span>
+            </div>
+          </div>
+        </div>
+      </form>
+    </section>
     <section class="grid" id="metrics"></section>
     <section class="two-col">
       <div class="panel">
@@ -341,12 +439,19 @@ HTML = r"""<!doctype html>
     const artifactList = document.getElementById("artifactList");
     const failedList = document.getElementById("failedList");
     const filePreview = document.getElementById("filePreview");
+    const startForm = document.getElementById("startForm");
+    const specText = document.getElementById("specText");
+    const specFile = document.getElementById("specFile");
+    const startBtn = document.getElementById("startBtn");
+    const startStatus = document.getElementById("startStatus");
 
     document.getElementById("refreshBtn").addEventListener("click", () => refreshAll(true));
     runSelect.addEventListener("change", () => {
       state.selected = runSelect.value;
       refreshRun();
     });
+    specFile.addEventListener("change", loadSpecFile);
+    startForm.addEventListener("submit", startRun);
 
     function clsStatus(status) {
       if (status === "pass") return "good";
@@ -370,6 +475,51 @@ HTML = r"""<!doctype html>
       const res = await fetch(url, { cache: "no-store" });
       if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
       return await res.json();
+    }
+
+    async function postJson(url, payload) {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || `${res.status} ${res.statusText}`);
+      return data;
+    }
+
+    async function loadSpecFile() {
+      const file = specFile.files && specFile.files[0];
+      if (!file) return;
+      startStatus.textContent = `Loaded ${file.name}`;
+      specText.value = await file.text();
+    }
+
+    async function startRun(event) {
+      event.preventDefault();
+      const text = specText.value.trim();
+      if (!text) {
+        startStatus.textContent = "Enter a requirement or choose a Markdown file first.";
+        return;
+      }
+      const file = specFile.files && specFile.files[0];
+      const payload = {
+        specText: text,
+        filename: file ? file.name : "dashboard_requirement.md",
+        llmProvider: document.getElementById("llmProvider").value
+      };
+      startBtn.disabled = true;
+      startStatus.textContent = "Starting agent run...";
+      try {
+        const result = await postJson("/api/start", payload);
+        startStatus.textContent = `Started PID ${result.pid}: ${result.artifact_dir}`;
+        state.selected = result.artifact_dir_name;
+        await refreshAll(true);
+      } catch (err) {
+        startStatus.textContent = `Start failed: ${err.message}`;
+      } finally {
+        startBtn.disabled = false;
+      }
     }
 
     async function refreshAll(forceLatest = false) {
@@ -770,6 +920,175 @@ def build_run_summary(root: Path, run_dir: Path) -> dict:
     }
 
 
+def slugify_keyword(text: str, fallback: str = "dashboard_run") -> str:
+    words = re.findall(r"[A-Za-z0-9가-힣_]+", text)
+    selected = []
+    for word in words[:4]:
+        clean = re.sub(r"[^A-Za-z0-9가-힣_]+", "_", word).strip("_").lower()
+        if clean:
+            selected.append(clean)
+    slug = "_".join(selected) or fallback
+    return slug[:48]
+
+
+def int_option(value: object, default: int, minimum: int = 0, maximum: int = 999) -> int:
+    try:
+        parsed = int(str(value).strip())
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, min(maximum, parsed))
+
+
+def env_int(names: tuple[str, ...], default: int, minimum: int = 0, maximum: int = 999) -> int:
+    for name in names:
+        value = os.getenv(name)
+        if value not in {None, ""}:
+            return int_option(value, default, minimum, maximum)
+    return default
+
+
+def bool_option(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def env_bool(names: tuple[str, ...], default: bool = False) -> bool:
+    for name in names:
+        value = os.getenv(name)
+        if value is None or value == "":
+            continue
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "yes", "on"}:
+            return True
+        if lowered in {"0", "false", "no", "off"}:
+            return False
+    return default
+
+
+def clean_filename(filename: str) -> str:
+    name = Path(str(filename or "dashboard_requirement.md")).name
+    name = re.sub(r"[^A-Za-z0-9가-힣_.-]+", "_", name).strip("._")
+    if not name:
+        name = "dashboard_requirement.md"
+    if Path(name).suffix.lower() not in {".md", ".markdown", ".txt"}:
+        name += ".md"
+    return name[:120]
+
+
+def unique_artifact_dir(root: Path, spec_text: str) -> Path:
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    base = root / f"output_{slugify_keyword(spec_text)}_{timestamp}"
+    candidate = base
+    index = 2
+    while candidate.exists():
+        candidate = root / f"{base.name}_{index}"
+        index += 1
+    candidate.mkdir(parents=True, exist_ok=False)
+    return candidate
+
+
+def redacted_command(command: list[str], env_updates: dict[str, str]) -> list[str]:
+    redacted = list(command)
+    if env_updates.get("LLM_API_KEY"):
+        redacted.append("[api-key passed by environment]")
+    return redacted
+
+
+def start_agent_run(root: Path, payload: dict) -> dict:
+    spec_text = str(payload.get("specText") or "").strip()
+    if not spec_text:
+        raise ValueError("Requirement text is empty.")
+    if len(spec_text) > MAX_SPEC_CHARS:
+        raise ValueError(f"Requirement is too large. Maximum is {MAX_SPEC_CHARS} characters.")
+
+    artifact_dir = unique_artifact_dir(root, spec_text)
+    spec_filename = clean_filename(str(payload.get("filename") or "dashboard_requirement.md"))
+    spec_path = artifact_dir / spec_filename
+    spec_path.write_text(spec_text, encoding="utf-8")
+
+    max_retries = env_int(("DASHBOARD_MAX_RETRIES", "MAX_RETRIES"), 10, 0, 999)
+    max_tasks = env_int(("DASHBOARD_MAX_MANAGER_TASKS", "MAX_MANAGER_TASKS"), 32, 1, 128)
+    command = [
+        sys.executable,
+        str(root / "main.py"),
+        "--spec",
+        str(spec_path),
+        "--artifact-dir",
+        str(artifact_dir),
+        "--max-retries",
+        str(max_retries),
+        "--max-architecture-retries",
+        str(max_retries),
+        "--max-supervisor-retries",
+        str(max_retries),
+        "--max-control-datapath-retries",
+        str(max_retries),
+        "--max-testbench-retries",
+        str(max_retries),
+        "--max-manager-tasks",
+        str(max_tasks),
+    ]
+
+    auto_approve = env_bool(("DASHBOARD_AUTO_APPROVE", "AUTO_APPROVE_FINAL"), True)
+    if auto_approve:
+        command.append("--auto-approve")
+    no_testbench = env_bool(("DASHBOARD_NO_TESTBENCH", "NO_TESTBENCH"), False)
+    require_lint = env_bool(("DASHBOARD_REQUIRE_LINT", "REQUIRE_LINT"), False)
+    if no_testbench:
+        command.append("--no-testbench")
+    if require_lint:
+        command.append("--require-lint")
+
+    llm_provider = str(payload.get("llmProvider") or "").strip()
+    if llm_provider:
+        command.extend(["--llm-provider", llm_provider])
+
+    env = os.environ.copy()
+
+    stdout_path = artifact_dir / "dashboard_stdout.log"
+    stdout_handle = stdout_path.open("ab")
+    process = subprocess.Popen(
+        command,
+        cwd=str(root),
+        env=env,
+        stdout=stdout_handle,
+        stderr=subprocess.STDOUT,
+        stdin=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    stdout_handle.close()
+
+    job = {
+        "pid": process.pid,
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "artifact_dir": artifact_dir.name,
+        "artifact_dir_path": str(artifact_dir),
+        "spec_file": spec_path.name,
+        "stdout_log": stdout_path.name,
+        "command": redacted_command(command, {}),
+        "options": {
+            "auto_approve": auto_approve,
+            "no_testbench": no_testbench,
+            "require_lint": require_lint,
+            "max_retries": max_retries,
+            "max_manager_tasks": max_tasks,
+            "llm_provider": str(payload.get("llmProvider") or ""),
+        },
+    }
+    (artifact_dir / "dashboard_job.json").write_text(
+        json.dumps(job, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return {
+        "pid": process.pid,
+        "artifact_dir": artifact_dir.name,
+        "artifact_dir_name": artifact_dir.name,
+        "spec_file": spec_path.name,
+        "stdout_log": stdout_path.name,
+    }
+
+
 class DashboardHandler(BaseHTTPRequestHandler):
     root = ROOT
 
@@ -811,6 +1130,35 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
         except OSError as exc:
             self.send_json({"error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
+
+    def do_POST(self):  # noqa: N802
+        parsed = urlparse(self.path)
+        try:
+            if parsed.path == "/api/start":
+                self.handle_start()
+            else:
+                self.send_error(HTTPStatus.NOT_FOUND.value, "Not found")
+        except (json.JSONDecodeError, ValueError) as exc:
+            self.send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+        except OSError as exc:
+            self.send_json({"error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
+
+    def read_json_body(self) -> dict:
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        if length <= 0:
+            raise ValueError("Request body is empty.")
+        if length > MAX_START_PAYLOAD_BYTES:
+            raise ValueError(f"Request body is too large. Maximum is {MAX_START_PAYLOAD_BYTES} bytes.")
+        raw = self.rfile.read(length)
+        data = json.loads(raw.decode("utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError("Request body must be a JSON object.")
+        return data
+
+    def handle_start(self):
+        payload = self.read_json_body()
+        result = start_agent_run(self.root, payload)
+        self.send_json(result, HTTPStatus.CREATED)
 
     def handle_runs(self):
         runs = []
@@ -860,6 +1208,8 @@ def main():
     root = Path(args.root).expanduser().resolve()
     if not root.is_dir():
         raise SystemExit(f"Dashboard root does not exist: {root}")
+    if load_dotenv is not None:
+        load_dotenv(root / ".env", override=False)
     DashboardHandler.root = root
     server = ThreadingHTTPServer((args.host, args.port), DashboardHandler)
     url_host = "localhost" if args.host in {"127.0.0.1", "0.0.0.0"} else args.host

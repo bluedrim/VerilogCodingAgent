@@ -39,6 +39,31 @@ The dashboard watches `output_*` artifact directories and shows:
 - Files under `failed_attempts/`.
 - Quick preview for any artifact file.
 
+You can also start a new run directly from the dashboard:
+
+- Type the RTL requirement into the text area.
+- Or choose a `.md`, `.markdown`, or `.txt` file; the browser loads its content
+  into the requirement box before starting.
+- Select only the LLM provider in the dashboard.
+- Click `Start Run`.
+
+The dashboard saves the submitted Markdown/text as `dashboard_requirement.md`
+inside the new `output_*` artifact directory and starts `main.py` in the
+background with final write approval enabled so the non-interactive run does
+not stop at the terminal approval prompt. Retry limits, lint policy, testbench
+policy, model names, API URLs, and API keys are read from `.env` or environment
+variables, not from visible dashboard fields.
+
+Dashboard `.env` controls:
+
+```bash
+DASHBOARD_AUTO_APPROVE=true
+DASHBOARD_NO_TESTBENCH=false
+DASHBOARD_REQUIRE_LINT=false
+DASHBOARD_MAX_RETRIES=10
+DASHBOARD_MAX_MANAGER_TASKS=32
+```
+
 Use a different port or artifact root when needed:
 
 ```bash
@@ -66,6 +91,30 @@ python3 main.py \
 LLM_PROVIDER=openai
 OPENAI_MODEL=gpt-4.1
 OPENAI_API_KEY=YOUR_OPENAI_API_KEY
+LLM_TEMPERATURE=0.1
+```
+
+## Codex run
+
+Use `codex` when you want the agent to use a Codex-targeted OpenAI-compatible
+chat model configuration. Provide a model and API key through `.env`,
+environment variables, or command-line arguments.
+
+```bash
+python3 main.py \
+  --llm-provider codex \
+  --llm-model gpt-5-codex \
+  --llm-api-key YOUR_CODEX_OR_OPENAI_API_KEY \
+  --spec spec.txt \
+  --auto-approve
+```
+
+`.env` example:
+
+```bash
+LLM_PROVIDER=codex
+CODEX_MODEL=gpt-5-codex
+CODEX_API_KEY=YOUR_CODEX_OR_OPENAI_API_KEY
 LLM_TEMPERATURE=0.1
 ```
 
@@ -129,11 +178,11 @@ Options:
 - `--max-manager-tasks`: Maximum number of Manager tasks accepted from planning.
 - `--fail-on-manager-fallback`: Fail instead of using the single-task fallback when Manager planning output is invalid.
 - `--artifact-dir`: Directory for generated artifacts and logs.
-- `--llm-provider`: `ollama`, `gpt-oss`, or `openai`.
-- `--llm-model`: Model name such as `gpt-4.1`, `gpt-oss`, `gpt-oss:20b`, `gpt-oss:120b`, or another Ollama model.
+- `--llm-provider`: `ollama`, `gpt-oss`, `openai`, or `codex`.
+- `--llm-model`: Model name such as `gpt-5-codex`, `gpt-4.1`, `gpt-oss`, `gpt-oss:20b`, `gpt-oss:120b`, or another Ollama model.
 - `--llm-temperature`: Model temperature.
 - `--llm-api-url`: OpenAI-compatible chat completions URL.
-- `--llm-api-key`: API key for OpenAI or the remote endpoint. The saved config redacts it.
+- `--llm-api-key`: API key for Codex, OpenAI, or the remote endpoint. The saved config redacts it.
 
 ## Agent prompts
 

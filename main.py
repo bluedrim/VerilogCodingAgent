@@ -150,10 +150,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--llm-provider",
-        choices=["ollama", "gpt-oss", "openai"],
-        help="LLM provider/backend. 'openai' uses the current account API key from OPENAI_API_KEY or --llm-api-key.",
+        choices=["ollama", "gpt-oss", "openai", "codex"],
+        help=(
+            "LLM provider/backend. 'openai' uses OPENAI_API_KEY; "
+            "'codex' uses CODEX_API_KEY or OPENAI_API_KEY."
+        ),
     )
-    parser.add_argument("--llm-model", help="LLM model name, for example gpt-oss:20b or gpt-4.1.")
+    parser.add_argument("--llm-model", help="LLM model name, for example gpt-5-codex, gpt-oss:20b, or gpt-4.1.")
     parser.add_argument("--llm-temperature", type=bounded_temperature, help="LLM temperature.")
     parser.add_argument(
         "--llm-timeout",
@@ -164,7 +167,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--llm-api-url",
         help="OpenAI-compatible chat completions URL, for example http://abc.net:30001/chat/completions.",
     )
-    parser.add_argument("--llm-api-key", help="API key for OpenAI or an OpenAI-compatible endpoint.")
+    parser.add_argument("--llm-api-key", help="API key for Codex, OpenAI, or an OpenAI-compatible endpoint.")
     parser.add_argument(
         "--fail-on-manager-fallback",
         action="store_true",
@@ -293,19 +296,35 @@ def resolve_llm_settings(
     timeout_seconds: int | None = None,
 ) -> Dict[str, object]:
     resolved_provider = (provider or os.getenv("LLM_PROVIDER") or "ollama").strip().lower()
-    if resolved_provider not in {"ollama", "gpt-oss", "openai"}:
-        raise ValueError("Unsupported LLM provider. Use ollama, gpt-oss, or openai.")
+    if resolved_provider not in {"ollama", "gpt-oss", "openai", "codex"}:
+        raise ValueError("Unsupported LLM provider. Use ollama, gpt-oss, openai, or codex.")
     resolved_temperature = (
         temperature if temperature is not None else float(os.getenv("LLM_TEMPERATURE", "0.1"))
     )
-    resolved_api_url = api_url or os.getenv("GPT_OSS_API_URL") or os.getenv("LLM_API_URL") or ""
-    resolved_api_key = (
-        api_key
-        or os.getenv("OPENAI_API_KEY")
-        or os.getenv("GPT_OSS_API_KEY")
-        or os.getenv("LLM_API_KEY")
-        or ""
-    )
+    if resolved_provider == "codex":
+        resolved_api_url = (
+            api_url
+            or os.getenv("CODEX_API_URL")
+            or os.getenv("OPENAI_API_URL")
+            or os.getenv("LLM_API_URL")
+            or ""
+        )
+        resolved_api_key = (
+            api_key
+            or os.getenv("CODEX_API_KEY")
+            or os.getenv("OPENAI_API_KEY")
+            or os.getenv("LLM_API_KEY")
+            or ""
+        )
+    elif resolved_provider == "openai":
+        resolved_api_url = api_url or os.getenv("OPENAI_API_URL") or os.getenv("LLM_API_URL") or ""
+        resolved_api_key = api_key or os.getenv("OPENAI_API_KEY") or os.getenv("LLM_API_KEY") or ""
+    elif resolved_provider == "gpt-oss":
+        resolved_api_url = api_url or os.getenv("GPT_OSS_API_URL") or os.getenv("LLM_API_URL") or ""
+        resolved_api_key = api_key or os.getenv("GPT_OSS_API_KEY") or os.getenv("LLM_API_KEY") or ""
+    else:
+        resolved_api_url = api_url or os.getenv("LLM_API_URL") or ""
+        resolved_api_key = api_key or os.getenv("LLM_API_KEY") or ""
     resolved_timeout_seconds = (
         timeout_seconds
         if timeout_seconds is not None
@@ -315,6 +334,15 @@ def resolve_llm_settings(
     if resolved_provider == "gpt-oss":
         resolved_model = model or os.getenv("GPT_OSS_MODEL") or os.getenv("LLM_MODEL") or "gpt-oss"
         backend = "openai-compatible" if resolved_api_url else "ollama"
+    elif resolved_provider == "codex":
+        resolved_model = (
+            model
+            or os.getenv("CODEX_MODEL")
+            or os.getenv("OPENAI_MODEL")
+            or os.getenv("LLM_MODEL")
+            or "gpt-5-codex"
+        )
+        backend = "openai"
     elif resolved_provider == "openai":
         resolved_model = model or os.getenv("OPENAI_MODEL") or os.getenv("LLM_MODEL") or "gpt-4.1"
         backend = "openai"
@@ -388,6 +416,9 @@ def create_llm(
             print("Install project dependencies with: python3 -m pip install -r requirements.txt")
             sys.exit(1)
         if backend == "openai" and not settings["api_key"]:
+            provider_name = str(settings.get("provider") or "openai")
+            if provider_name == "codex":
+                raise ValueError("Codex provider requires CODEX_API_KEY, OPENAI_API_KEY, or --llm-api-key.")
             raise ValueError("OpenAI provider requires OPENAI_API_KEY or --llm-api-key.")
         kwargs = {
             "model": model_name,
