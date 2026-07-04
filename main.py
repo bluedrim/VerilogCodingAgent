@@ -1513,6 +1513,25 @@ def write_text_artifact(relative_path: str, content: str):
     path = artifact_path(relative_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
+    _write_dashboard_heartbeat(relative_path, path)
+
+
+def _write_dashboard_heartbeat(relative_path: str, written_path: Path):
+    if str(relative_path) == "dashboard_heartbeat.json":
+        return
+    try:
+        payload = {
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "artifact_dir": str(ARTIFACT_DIR),
+            "last_artifact": str(relative_path),
+            "last_artifact_path": str(written_path),
+            "last_artifact_bytes": written_path.stat().st_size,
+        }
+        heartbeat = ARTIFACT_DIR / "dashboard_heartbeat.json"
+        heartbeat.parent.mkdir(parents=True, exist_ok=True)
+        heartbeat.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    except OSError:
+        pass
 
 
 def write_json_artifact(relative_path: str, content: object):

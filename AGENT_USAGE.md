@@ -15,6 +15,36 @@ requirement file path such as `@spec.txt`.
 python3 main.py --spec spec.txt --auto-approve --max-retries 3
 ```
 
+## Live dashboard
+
+Start the dashboard in a second terminal while the agent is running:
+
+```bash
+python3 dashboard.py
+```
+
+Then open:
+
+```text
+http://localhost:8766
+```
+
+The dashboard watches `output_*` artifact directories and shows:
+
+- Current run status and latest heartbeat.
+- Stage pass/fail/force-forward state.
+- Retry counts and retry limits.
+- Latest reports from architecture, Supervisor, Control/Data Path, coding, microarchitecture, verification, and final lint.
+- Recent files under `logs/`.
+- Files under `failed_attempts/`.
+- Quick preview for any artifact file.
+
+Use a different port or artifact root when needed:
+
+```bash
+python3 dashboard.py --port 8766 --root .
+```
+
 ## OpenAI account run
 
 Use `openai` when you want the agent to call models through your OpenAI account API key.
@@ -137,6 +167,7 @@ Important artifacts:
 - `<artifact-dir>/user_requirement.txt`
 - `<artifact-dir>/llm_config.json`
 - `<artifact-dir>/execution_config.json`
+- `<artifact-dir>/dashboard_heartbeat.json`
 - `<artifact-dir>/manager_plan.json`
 - `<artifact-dir>/architecture_contract.md`
 - `<artifact-dir>/logs/architecture_review_attempt_*.md`

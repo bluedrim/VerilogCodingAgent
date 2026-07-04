@@ -6,6 +6,17 @@ The agent breaks a user RTL request into implementation tasks, creates an archit
 
 See [AGENT_USAGE.md](AGENT_USAGE.md) for setup and run examples.
 
+## Run Dashboard
+
+Monitor active and completed `output_*` agent runs with the local dashboard:
+
+```bash
+python3 dashboard.py
+```
+
+Open `http://localhost:8766` to view the current run status, retry counts,
+force-forward flags, recent logs, failed attempts, and generated artifacts.
+
 ## RTL DataPath Visualizer
 
 `rtl_datapath_visualizer.py` can read an `rte`-style filelist (`.f`) and generate:
