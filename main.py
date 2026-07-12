@@ -1054,8 +1054,26 @@ CODING_REPAIR_BACKLOG_STAGES = (
 )
 
 
-def render_coding_repair_backlog(state: "AgentState", max_chars: int = 12000) -> str:
+CODING_BACKLOG_SNAPSHOT_STAGES = {
+    "microarchitecture_review",
+    "verification",
+    "verification_lint",
+}
+
+
+def active_coding_feedback_entries(state: "AgentState") -> List[Dict[str, str]]:
     entries = review_feedback_entries(state, CODING_REPAIR_BACKLOG_STAGES)
+    latest_snapshot_index = -1
+    for idx, entry in enumerate(entries):
+        if entry.get("stage") in CODING_BACKLOG_SNAPSHOT_STAGES:
+            latest_snapshot_index = idx
+    if latest_snapshot_index >= 0:
+        entries = entries[latest_snapshot_index:]
+    return entries
+
+
+def render_coding_repair_backlog(state: "AgentState", max_chars: int = 12000) -> str:
+    entries = active_coding_feedback_entries(state)
     if not entries:
         return "(none)"
 
@@ -1537,6 +1555,102 @@ def _write_dashboard_heartbeat(relative_path: str, written_path: Path):
 
 def write_json_artifact(relative_path: str, content: object):
     write_text_artifact(relative_path, json.dumps(content, indent=2))
+
+
+DEFAULT_CODE_PROMPT_KEYS = {
+    "accepted_rtl_files",
+    "candidate_rtl",
+    "current_candidate_rtl",
+    "invalid_output",
+    "previous_candidate_rtl",
+    "previous_testbench_files",
+    "rtl_context",
+}
+
+
+def _render_prompt_template(template: str, payload: Dict[str, str]) -> str:
+    try:
+        return template.format(**payload)
+    except Exception as exc:
+        keys = ", ".join(sorted(payload))
+        return (
+            template
+            + "\n\n[Prompt render preview failed: "
+            + f"{exc}. Available payload keys: {keys}]"
+        )
+
+
+def log_agent_prompt(
+    agent_name: str,
+    attempt: object,
+    system_prompt: str,
+    human_template: str,
+    payload: Dict[str, object],
+    code_keys: tuple[str, ...] | None = None,
+) -> str:
+    """Write a reviewable snapshot of the exact agent input message."""
+    safe_agent = sanitize_artifact_name(agent_name, "agent")
+    safe_attempt = sanitize_artifact_name(attempt, "attempt")
+    prefix = f"logs/agent_messages/{safe_agent}_attempt_{safe_attempt}"
+    rendered_payload = {key: str(value) for key, value in payload.items()}
+    externalized_keys = set(DEFAULT_CODE_PROMPT_KEYS)
+    if code_keys:
+        externalized_keys.update(code_keys)
+
+    snapshot_payload = {}
+    externalized = {}
+    for key, value in rendered_payload.items():
+        if key in externalized_keys and value.strip() and value.strip() != "(none)":
+            key_name = sanitize_artifact_name(key, "payload")
+            artifact = f"{prefix}_{key_name}.md"
+            write_text_artifact(artifact, value)
+            snapshot_payload[key] = f"[externalized payload: {artifact}; chars={len(value)}]"
+            externalized[key] = artifact
+        else:
+            snapshot_payload[key] = value
+
+    human_message = _render_prompt_template(human_template, snapshot_payload)
+    sizes = {key: len(value) for key, value in rendered_payload.items()}
+    try:
+        max_chars = int(os.getenv("AGENT_MESSAGE_LOG_MAX_CHARS", "300000"))
+    except ValueError:
+        max_chars = 300000
+    content = [
+        "# Agent Message Snapshot",
+        "",
+        f"- agent: {safe_agent}",
+        f"- attempt: {safe_attempt}",
+        f"- system_chars: {len(system_prompt)}",
+        f"- rendered_human_chars: {len(human_message)}",
+        "",
+        "## Payload Sizes",
+        "",
+        "```json",
+        json.dumps(sizes, indent=2, ensure_ascii=False),
+        "```",
+        "",
+        "## Externalized Code/RTL Payloads",
+        "",
+    ]
+    if externalized:
+        content.extend(f"- {key}: {path}" for key, path in sorted(externalized.items()))
+    else:
+        content.append("(none)")
+    content.extend(
+        [
+            "",
+            "## System Message",
+            "",
+            system_prompt,
+            "",
+            "## Human Message",
+            "",
+            clip_text(human_message, max_chars),
+        ]
+    )
+    path = f"{prefix}.md"
+    write_text_artifact(path, "\n".join(content))
+    return path
 
 
 def extract_module_names(files: List[Dict[str, str]]) -> List[str]:

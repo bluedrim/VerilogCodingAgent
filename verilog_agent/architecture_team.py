@@ -34,15 +34,8 @@ def architecture_agent(state: AgentState):
         "architecture contract",
         state.get("max_context_chars", 120_000),
     )
-    prompt = ChatPromptTemplate.from_messages(
-        [
-            (
-                "system",
-                load_prompt("architecture.md"),
-            ),
-            (
-                "human",
-                """
+    system_prompt = load_prompt("architecture.md")
+    human_template = """
 User requirement:
 {user_request}
 
@@ -62,26 +55,41 @@ Architecture reviewer revision checklist:
 {revision_checklist}
 
 {review_feedback}
-""",
+"""
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            (
+                "system",
+                system_prompt,
+            ),
+            (
+                "human",
+                human_template,
             ),
         ]
     )
-    response = (prompt | llm).invoke(
-        {
-            "user_request": state["user_request"],
-            "manager_plan": render_manager_plan(state["manager_plan"]),
-            "manager_handoff": (
-                "Full Manager handoff:\n"
-                f"{render_manager_plan(state['manager_plan'])}\n\n"
-                "Original user requirement, authoritative source:\n"
-                f"{state['user_request']}"
-            ),
-            "previous_architecture_contract": state.get("architecture_contract") or "(none)",
-            "revision_mode": revision_mode,
-            "revision_checklist": revision_checklist,
-            "review_feedback": review_feedback,
-        }
+    payload = {
+        "user_request": state["user_request"],
+        "manager_plan": render_manager_plan(state["manager_plan"]),
+        "manager_handoff": (
+            "Full Manager handoff:\n"
+            f"{render_manager_plan(state['manager_plan'])}\n\n"
+            "Original user requirement, authoritative source:\n"
+            f"{state['user_request']}"
+        ),
+        "previous_architecture_contract": state.get("architecture_contract") or "(none)",
+        "revision_mode": revision_mode,
+        "revision_checklist": revision_checklist,
+        "review_feedback": review_feedback,
+    }
+    log_agent_prompt(
+        "architecture",
+        state.get("architecture_retry_count", 0) + 1,
+        system_prompt,
+        human_template,
+        payload,
     )
+    response = (prompt | llm).invoke(payload)
     write_text_artifact("logs/architecture_revision_checklist.md", revision_checklist)
     write_text_artifact("architecture_contract.md", response.content)
     unchanged_report = unchanged_review_revision_report(
@@ -120,15 +128,8 @@ Architecture reviewer revision checklist:
 @_with_runtime
 def architecture_review_agent(state: AgentState):
     print("---ARCHITECTURE REVIEW: Checking architecture contract completeness---")
-    prompt = ChatPromptTemplate.from_messages(
-        [
-            (
-                "system",
-                load_prompt("architecture_review.md"),
-            ),
-            (
-                "human",
-                """
+    system_prompt = load_prompt("architecture_review.md")
+    human_template = """
 Original user requirement:
 {user_request}
 
@@ -137,22 +138,37 @@ Manager handoff:
 
 Architecture contract:
 {architecture_contract}
-""",
+"""
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            (
+                "system",
+                system_prompt,
+            ),
+            (
+                "human",
+                human_template,
             ),
         ]
     )
-    response = (prompt | llm).invoke(
-        {
-            "user_request": state["user_request"],
-            "manager_handoff": (
-                "Full Manager handoff:\n"
-                f"{render_manager_plan(state['manager_plan'])}\n\n"
-                "Original user requirement, authoritative source:\n"
-                f"{state['user_request']}"
-            ),
-            "architecture_contract": state.get("architecture_contract") or "(none)",
-        }
+    payload = {
+        "user_request": state["user_request"],
+        "manager_handoff": (
+            "Full Manager handoff:\n"
+            f"{render_manager_plan(state['manager_plan'])}\n\n"
+            "Original user requirement, authoritative source:\n"
+            f"{state['user_request']}"
+        ),
+        "architecture_contract": state.get("architecture_contract") or "(none)",
+    }
+    log_agent_prompt(
+        "architecture_review",
+        state.get("architecture_retry_count", 0) + 1,
+        system_prompt,
+        human_template,
+        payload,
     )
+    response = (prompt | llm).invoke(payload)
 
     passed, report, decision_details = parse_review_result_with_details(
         response.content, "Architecture review output was not valid JSON."

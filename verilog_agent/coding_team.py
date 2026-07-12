@@ -66,16 +66,11 @@ def _code_free_status_message(stage: str, task_id: str, detail: str) -> AIMessag
 
 
 def _review_feedback_for_coding(state: AgentState, max_chars: int) -> str:
-    return render_review_feedback(state, IMPLEMENTATION_REVIEW_STAGES, max_chars)
+    return render_coding_repair_backlog(state, max_chars)
 
 
 def _coding_feedback_entries(state: AgentState) -> list[dict[str, str]]:
-    stage_set = set(IMPLEMENTATION_REVIEW_STAGES)
-    return [
-        entry
-        for entry in state.get("review_feedback_log", [])
-        if entry.get("stage") in stage_set
-    ]
+    return active_coding_feedback_entries(state)
 
 
 def _render_previous_candidate_manifest(files: list[dict[str, str]]) -> str:
@@ -200,7 +195,7 @@ def _coding_anti_stall_level(state: AgentState) -> int:
     ):
         level += 1
 
-    for entry in state.get("review_feedback_log", []):
+    for entry in _coding_feedback_entries(state):
         stage = str(entry.get("stage") or "")
         if stage not in IMPLEMENTATION_REVIEW_STAGES and stage not in LOCAL_CODING_GATE_STAGES:
             continue
@@ -423,6 +418,99 @@ def _coding_backlog_count(state: AgentState) -> int:
     return len(_coding_feedback_entries(state))
 
 
+CODING_PROMPT_WEIGHTS = {
+    "user_request": 5,
+    "architecture_contract": 9,
+    "task": 5,
+    "manager_handoff": 4,
+    "supervisor_plan": 10,
+    "control_datapath_plan": 10,
+    "implementation_obligations": 8,
+    "rtl_context": 8,
+    "candidate_rtl": 30,
+    "previous_candidate_rtl": 24,
+    "current_candidate_rtl": 24,
+    "invalid_output": 24,
+    "coding_repair_backlog": 6,
+    "revision_plan": 4,
+    "repair_brief": 3,
+    "repair_contract": 5,
+    "feedback": 1,
+    "coding_action_plan": 8,
+    "gate_report": 8,
+    "parser_error": 3,
+}
+
+
+def _budget_coding_prompt_payload(
+    payload: dict[str, object], context_limit: int
+) -> tuple[dict[str, str], dict[str, object]]:
+    def clip_exact(text: str, limit: int) -> str:
+        if limit <= 0:
+            return ""
+        if len(text) <= limit:
+            return text
+        marker = "\n... [truncated]"
+        if limit <= len(marker):
+            return text[:limit]
+        return text[: limit - len(marker)] + marker
+
+    rendered = {key: str(value) for key, value in payload.items()}
+    before_sizes = {key: len(value) for key, value in rendered.items()}
+    if context_limit <= 0:
+        return rendered, {
+            "context_limit": context_limit,
+            "budget_disabled": True,
+            "total_before": sum(before_sizes.values()),
+            "total_after": sum(before_sizes.values()),
+            "before_sizes": before_sizes,
+            "after_sizes": before_sizes,
+        }
+
+    if rendered.get("coding_repair_backlog", "").strip() not in {"", "(none)"}:
+        rendered["feedback"] = (
+            "(raw feedback consolidated into the coding repair backlog, action plan, "
+            "and repair contract above)"
+        )
+
+    reserve = min(max(256, context_limit // 10), max(context_limit // 3, 1))
+    weighted_budget = max(context_limit - reserve, 1)
+    active_weights = {
+        key: CODING_PROMPT_WEIGHTS.get(key, 1)
+        for key in rendered
+    }
+    total_weight = sum(active_weights.values()) or 1
+
+    allocations = {
+        key: weighted_budget * weight // total_weight
+        for key, weight in active_weights.items()
+    }
+    remaining = weighted_budget - sum(allocations.values())
+    remainder_order = sorted(
+        active_weights,
+        key=lambda key: (weighted_budget * active_weights[key]) % total_weight,
+        reverse=True,
+    )
+    for key in remainder_order[:remaining]:
+        allocations[key] += 1
+
+    for key in active_weights:
+        rendered[key] = clip_exact(rendered[key], allocations[key])
+
+    after_sizes = {key: len(value) for key, value in rendered.items()}
+    return rendered, {
+        "context_limit": context_limit,
+        "reserved_for_prompt_labels_and_system_message": reserve,
+        "weighted_payload_budget": weighted_budget,
+        "unweighted_keys": sorted(key for key in rendered if key not in CODING_PROMPT_WEIGHTS),
+        "total_before": sum(before_sizes.values()),
+        "total_after": sum(after_sizes.values()),
+        "allocations": allocations,
+        "before_sizes": before_sizes,
+        "after_sizes": after_sizes,
+    }
+
+
 def _render_deterministic_coding_action_plan(state: AgentState, max_chars: int) -> str:
     task = current_manager_task(state)
     entries = _coding_feedback_entries(state)
@@ -504,12 +592,8 @@ def _build_coding_action_plan(
         )
         return deterministic_plan
 
-    planner_prompt = ChatPromptTemplate.from_messages(
-        [
-            ("system", load_prompt("verilog_coding_action_plan.md")),
-            (
-                "human",
-                """
+    system_prompt = load_prompt("verilog_coding_action_plan.md")
+    human_template = """
 Original user requirement:
 {user_request}
 
@@ -542,26 +626,47 @@ Review-to-code repair contract:
 
 Deterministic minimum action plan:
 {deterministic_plan}
-""",
+"""
+    planner_prompt = ChatPromptTemplate.from_messages(
+        [
+            ("system", system_prompt),
+            (
+                "human",
+                human_template,
             ),
         ]
     )
     try:
-        response = (planner_prompt | llm).invoke(
-            {
-                "user_request": prompt_payload["user_request"],
-                "task": render_manager_task(task),
-                "supervisor_plan": prompt_payload["supervisor_plan"],
-                "control_datapath_plan": prompt_payload["control_datapath_plan"],
-                "implementation_obligations": prompt_payload["implementation_obligations"],
-                "previous_candidate_rtl": prompt_payload["previous_candidate_rtl"],
-                "coding_repair_backlog": prompt_payload["coding_repair_backlog"],
-                "revision_plan": prompt_payload["revision_plan"],
-                "repair_brief": prompt_payload["repair_brief"],
-                "repair_contract": prompt_payload["repair_contract"],
-                "deterministic_plan": deterministic_plan,
-            }
+        payload = {
+            "user_request": prompt_payload["user_request"],
+            "task": render_manager_task(task),
+            "supervisor_plan": prompt_payload["supervisor_plan"],
+            "control_datapath_plan": prompt_payload["control_datapath_plan"],
+            "implementation_obligations": prompt_payload["implementation_obligations"],
+            "previous_candidate_rtl": clip_text(
+                prompt_payload["previous_candidate_rtl"], section_limit
+            ),
+            "coding_repair_backlog": prompt_payload["coding_repair_backlog"],
+            "revision_plan": prompt_payload["revision_plan"],
+            "repair_brief": prompt_payload["repair_brief"],
+            "repair_contract": prompt_payload["repair_contract"],
+            "deterministic_plan": deterministic_plan,
+        }
+        payload, budget_report = _budget_coding_prompt_payload(
+            payload, state.get("max_context_chars", 120_000)
         )
+        write_json_artifact(
+            f"logs/{task_id}_coding_action_plan_prompt_sizes_attempt_{state.get('coding_retry_count', 0) + 1}.json",
+            budget_report,
+        )
+        log_agent_prompt(
+            "verilog_coding_action_plan",
+            f"{task_id}_{state.get('coding_retry_count', 0) + 1}",
+            system_prompt,
+            human_template,
+            payload,
+        )
+        response = (planner_prompt | llm).invoke(payload)
         plan = str(response.content or "").strip()
     except Exception as exc:
         plan = f"{deterministic_plan}\n\nAction planner failed; use deterministic plan. Error: {exc}"
@@ -821,6 +926,116 @@ def _review_gate_report(state: AgentState, files: list[dict[str, str]]) -> str:
     return "\n\n".join(reports)
 
 
+def _coding_closure_audit(
+    state: AgentState,
+    task: dict,
+    task_id: str,
+    files: list[dict[str, str]],
+    prompt_payload: dict,
+    section_limit: int,
+    phase: str,
+) -> tuple[bool, str]:
+    if not _coding_feedback_entries(state):
+        return True, ""
+
+    attempt = state.get("coding_retry_count", 0) + 1
+    system_prompt = load_prompt("verilog_coding_closure_review.md")
+    human_template = """
+Original user requirement:
+{user_request}
+
+Current Manager task:
+{task}
+
+Architecture contract:
+{architecture_contract}
+
+Supervisor detailed assignment:
+{supervisor_plan}
+
+Control/Data Path plan:
+{control_datapath_plan}
+
+Mandatory RTL coding action plan:
+{coding_action_plan}
+
+Coding repair backlog whose closure must be checked:
+{coding_repair_backlog}
+
+Current RTL candidate:
+{candidate_rtl}
+"""
+    candidate_limit = max(section_limit, state.get("max_context_chars", 120_000) // 2)
+    payload = {
+        "user_request": prompt_payload["user_request"],
+        "task": render_manager_task(task),
+        "architecture_contract": prompt_payload["architecture_contract"],
+        "supervisor_plan": prompt_payload["supervisor_plan"],
+        "control_datapath_plan": prompt_payload["control_datapath_plan"],
+        "coding_action_plan": prompt_payload["coding_action_plan"],
+        "coding_repair_backlog": prompt_payload["coding_repair_backlog"],
+        "candidate_rtl": render_files_for_prompt(files, candidate_limit),
+    }
+    payload, budget_report = _budget_coding_prompt_payload(
+        payload, state.get("max_context_chars", 120_000)
+    )
+    write_json_artifact(
+        f"logs/{task_id}_coding_closure_audit_prompt_sizes_{phase}_attempt_{attempt}.json",
+        budget_report,
+    )
+    log_agent_prompt(
+        "verilog_coding_closure_review",
+        f"{task_id}_{attempt}_{phase}",
+        system_prompt,
+        human_template,
+        payload,
+    )
+    prompt = ChatPromptTemplate.from_messages(
+        [("system", system_prompt), ("human", human_template)]
+    )
+    try:
+        response = (prompt | llm).invoke(payload)
+    except Exception as exc:
+        write_text_artifact(
+            f"logs/{task_id}_coding_closure_audit_{phase}_attempt_{attempt}.md",
+            f"Coding closure audit skipped after runtime error: {exc}",
+        )
+        return True, ""
+
+    passed, report, decision_details = parse_review_result_with_details(
+        response.content,
+        "Coding closure audit output was not valid JSON.",
+    )
+    write_text_artifact(
+        f"logs/{task_id}_coding_closure_audit_raw_{phase}_attempt_{attempt}.txt",
+        response.content,
+    )
+    write_json_artifact(
+        f"logs/{task_id}_coding_closure_audit_decision_{phase}_attempt_{attempt}.json",
+        decision_details,
+    )
+
+    if (
+        decision_details.get("source") == "text"
+        and decision_details.get("fallback_text_verdict") is None
+    ):
+        write_text_artifact(
+            f"logs/{task_id}_coding_closure_audit_{phase}_attempt_{attempt}.md",
+            "Coding closure audit skipped because the auditor returned no parseable verdict.\n\n"
+            + str(response.content),
+        )
+        return True, ""
+
+    final_report = report or ("PASS" if passed else "Coding repair backlog remains open.")
+    write_text_artifact(
+        f"logs/{task_id}_coding_closure_audit_{phase}_attempt_{attempt}.md",
+        final_report,
+    )
+    if passed:
+        return True, ""
+    return False, "Coding closure audit failed:\n" + final_report
+
+
 def _coding_repair_scope_audit(state: AgentState, files: list[dict[str, str]]) -> dict:
     previous_files = state.get("candidate_files", [])
     previous_hashes = _functional_file_hashes(previous_files)
@@ -893,10 +1108,14 @@ def _attempt_review_gate_repair(
     section_limit: int,
 ):
     attempt = state.get("coding_retry_count", 0) + 1
+    candidate_limit = max(
+        section_limit,
+        state.get("max_context_chars", 120_000) // 3,
+    )
     force_anti_stall = _is_unchanged_gate_report(gate_report)
     gate_candidate_reference = _render_previous_candidate_for_coding(
         state,
-        section_limit,
+        candidate_limit,
         force_anti_stall=force_anti_stall,
         anti_stall_reason=gate_report if force_anti_stall else "",
     )
@@ -915,12 +1134,8 @@ def _attempt_review_gate_repair(
         f"logs/{task_id}_review_gate_failure_attempt_{attempt}.md",
         gate_report,
     )
-    repair_prompt = ChatPromptTemplate.from_messages(
-        [
-            ("system", load_prompt("verilog_review_gate_repair.md")),
-            (
-                "human",
-                """
+    system_prompt = load_prompt("verilog_review_gate_repair.md")
+    human_template = """
 Original user requirement:
 {user_request}
 
@@ -971,39 +1186,58 @@ Local review-gate failure that must be closed:
 
 Raw reviewer feedback:
 {feedback}
-""",
+"""
+    repair_prompt = ChatPromptTemplate.from_messages(
+        [
+            ("system", system_prompt),
+            (
+                "human",
+                human_template,
             ),
         ]
     )
-    repair_response = (repair_prompt | llm).invoke(
-        {
-            "user_request": prompt_payload["user_request"],
-            "architecture_contract": prompt_payload["architecture_contract"],
-            "task": render_manager_task(task),
-            "manager_handoff": prompt_payload["manager_handoff"],
-            "supervisor_plan": prompt_payload["supervisor_plan"],
-            "control_datapath_plan": prompt_payload["control_datapath_plan"],
-            "implementation_obligations": prompt_payload["implementation_obligations"],
-            "repair_intensity": prompt_payload["repair_intensity"],
-            "coding_action_plan": coding_action_plan,
-            "previous_candidate_rtl": (
-                gate_candidate_reference
-                if force_anti_stall
-                else prompt_payload["previous_candidate_rtl"]
-            ),
-            "current_candidate_rtl": (
-                gate_candidate_reference
-                if force_anti_stall
-                else render_files_for_prompt(files, section_limit)
-            ),
-            "coding_repair_backlog": prompt_payload["coding_repair_backlog"],
-            "revision_plan": prompt_payload["revision_plan"],
-            "repair_brief": prompt_payload["repair_brief"],
-            "repair_contract": prompt_payload["repair_contract"],
-            "gate_report": gate_report,
-            "feedback": prompt_payload["feedback"],
-        }
+    payload = {
+        "user_request": prompt_payload["user_request"],
+        "architecture_contract": prompt_payload["architecture_contract"],
+        "task": render_manager_task(task),
+        "manager_handoff": prompt_payload["manager_handoff"],
+        "supervisor_plan": prompt_payload["supervisor_plan"],
+        "control_datapath_plan": prompt_payload["control_datapath_plan"],
+        "implementation_obligations": prompt_payload["implementation_obligations"],
+        "repair_intensity": prompt_payload["repair_intensity"],
+        "coding_action_plan": coding_action_plan,
+        "previous_candidate_rtl": (
+            gate_candidate_reference
+            if force_anti_stall
+            else prompt_payload["previous_candidate_rtl"]
+        ),
+        "current_candidate_rtl": (
+            gate_candidate_reference
+            if force_anti_stall
+            else render_files_for_prompt(files, candidate_limit)
+        ),
+        "coding_repair_backlog": prompt_payload["coding_repair_backlog"],
+        "revision_plan": prompt_payload["revision_plan"],
+        "repair_brief": prompt_payload["repair_brief"],
+        "repair_contract": prompt_payload["repair_contract"],
+        "gate_report": gate_report,
+        "feedback": prompt_payload["feedback"],
+    }
+    payload, budget_report = _budget_coding_prompt_payload(
+        payload, state.get("max_context_chars", 120_000)
     )
+    write_json_artifact(
+        f"logs/{task_id}_review_gate_repair_prompt_sizes_attempt_{attempt}.json",
+        budget_report,
+    )
+    log_agent_prompt(
+        "verilog_review_gate_repair",
+        f"{task_id}_{attempt}",
+        system_prompt,
+        human_template,
+        payload,
+    )
+    repair_response = (repair_prompt | llm).invoke(payload)
     write_text_artifact(
         f"logs/{task_id}_review_gate_repair_raw_attempt_{attempt}.txt",
         repair_response.content,
@@ -1052,11 +1286,23 @@ def _repair_candidate_against_review_gate(
     section_limit: int,
     messages: list,
 ):
+    initial_hard_report = _hard_review_gate_report(state, files)
     gate_report = _review_gate_report(state, files)
+    if not initial_hard_report:
+        _closure_passed, closure_report = _coding_closure_audit(
+            state,
+            task,
+            task_id,
+            files,
+            prompt_payload,
+            section_limit,
+            "initial",
+        )
+        if closure_report:
+            gate_report = "\n\n".join(item for item in (gate_report, closure_report) if item)
     if not gate_report:
         return files, messages, ""
 
-    initial_hard_report = _hard_review_gate_report(state, files)
     repaired_files, repair_response, repair_error = _attempt_review_gate_repair(
         state, task, task_id, files, gate_report, prompt_payload, section_limit
     )
@@ -1104,6 +1350,23 @@ def _repair_candidate_against_review_gate(
             next_messages,
             second_soft_report
             + "\n\nAutomated review-gate repair was attempted but did not make a broad enough functional RTL change.",
+        )
+
+    _closure_passed, second_closure_report = _coding_closure_audit(
+        state,
+        task,
+        task_id,
+        repaired_files,
+        prompt_payload,
+        section_limit,
+        "repaired",
+    )
+    if second_closure_report:
+        return (
+            repaired_files,
+            next_messages,
+            second_closure_report
+            + "\n\nAutomated review-gate repair was attempted but did not close the review backlog.",
         )
 
     write_json_artifact(
@@ -1190,6 +1453,7 @@ def verilog_coding_team_agent(state: AgentState):
     print(f"---VERILOG CODING TEAM: Implementing {task_label}---")
     context_limit = state.get("max_context_chars", 120_000)
     section_limit = split_context_budget(context_limit, 10)
+    candidate_source_limit = max(section_limit, context_limit // 3)
     feedback = _review_feedback_for_coding(state, section_limit)
     revision_plan = _render_coding_revision_plan(state, section_limit)
     repair_brief = _render_targeted_repair_brief(state, section_limit)
@@ -1339,7 +1603,7 @@ Review-to-code repair contract:
             state.get("candidate_files", [])
         ),
         "previous_candidate_rtl": _render_previous_candidate_for_coding(
-            state, section_limit
+            state, candidate_source_limit
         ),
         "coding_repair_backlog": render_coding_repair_backlog(state, section_limit),
         "revision_plan": revision_plan,
@@ -1351,6 +1615,9 @@ Review-to-code repair contract:
         state, task, task_id, prompt_payload, section_limit
     )
     prompt_payload["coding_action_plan"] = coding_action_plan
+    prompt_payload, prompt_budget_report = _budget_coding_prompt_payload(
+        prompt_payload, context_limit
+    )
     write_text_artifact(
         f"logs/{task_id}_implementation_obligations_attempt_{state.get('coding_retry_count', 0) + 1}.md",
         prompt_payload["implementation_obligations"],
@@ -1369,17 +1636,20 @@ Review-to-code repair contract:
     )
     write_json_artifact(
         f"logs/{task_id}_coding_prompt_sizes_attempt_{state.get('coding_retry_count', 0) + 1}.json",
-        {
-            "context_limit": context_limit,
-            "section_limit": section_limit,
-            "review_driven_repair": review_driven_repair,
-            "sections": {
-                key: len(str(value))
-                for key, value in prompt_payload.items()
-            },
-        },
+        dict(
+            prompt_budget_report,
+            section_limit=section_limit,
+            review_driven_repair=review_driven_repair,
+        ),
     )
     attempt = state.get("coding_retry_count", 0) + 1
+    log_agent_prompt(
+        "verilog_coding_team",
+        f"{task_id}_{attempt}",
+        system_prompt,
+        human_prompt,
+        prompt_payload,
+    )
     response = (prompt | llm).invoke(prompt_payload)
     write_text_artifact(
         f"logs/{task_id}_coding_raw_attempt_{attempt}.txt",
@@ -1449,15 +1719,8 @@ Review-to-code repair contract:
     exc = initial_error
     print(f"---WARNING: Coding team output failed {initial_error_kind}, attempting repair: {exc}---")
     try:
-        repair_prompt = ChatPromptTemplate.from_messages(
-            [
-                (
-                    "system",
-                    load_prompt("verilog_coding_repair.md"),
-                ),
-                (
-                    "human",
-                    """
+        repair_system_prompt = load_prompt("verilog_coding_repair.md")
+        repair_human_template = """
 Current Manager task:
 {task}
 
@@ -1499,30 +1762,52 @@ Invalid coding output:
 
 Parser or validation error:
 {parser_error}
-""",
+"""
+        repair_prompt = ChatPromptTemplate.from_messages(
+            [
+                (
+                    "system",
+                    repair_system_prompt,
+                ),
+                (
+                    "human",
+                    repair_human_template,
                 ),
             ]
         )
-        repair_response = (repair_prompt | llm).invoke(
-            {
-                "task": render_manager_task(task),
-                "supervisor_plan": state.get("supervisor_plan") or "(none)",
-                "architecture_contract": prompt_payload["architecture_contract"],
-                "control_datapath_plan": prompt_payload["control_datapath_plan"],
-                "implementation_obligations": prompt_payload["implementation_obligations"],
-                "revision_plan": revision_plan,
-                "repair_brief": repair_brief,
-                "repair_contract": repair_contract,
-                "repair_intensity": repair_intensity,
-                "coding_action_plan": coding_action_plan,
-                "coding_repair_backlog": prompt_payload["coding_repair_backlog"],
-                "previous_candidate_rtl": _render_previous_candidate_for_coding(
-                    state, section_limit
-                ),
-                "invalid_output": response.content,
-                "parser_error": str(exc),
-            }
+        repair_payload = {
+            "task": render_manager_task(task),
+            "supervisor_plan": state.get("supervisor_plan") or "(none)",
+            "architecture_contract": prompt_payload["architecture_contract"],
+            "control_datapath_plan": prompt_payload["control_datapath_plan"],
+            "implementation_obligations": prompt_payload["implementation_obligations"],
+            "revision_plan": revision_plan,
+            "repair_brief": repair_brief,
+            "repair_contract": repair_contract,
+            "repair_intensity": repair_intensity,
+            "coding_action_plan": coding_action_plan,
+            "coding_repair_backlog": prompt_payload["coding_repair_backlog"],
+            "previous_candidate_rtl": _render_previous_candidate_for_coding(
+                state, candidate_source_limit
+            ),
+            "invalid_output": response.content,
+            "parser_error": str(exc),
+        }
+        repair_payload, repair_budget_report = _budget_coding_prompt_payload(
+            repair_payload, context_limit
         )
+        write_json_artifact(
+            f"logs/{task_id}_coding_repair_prompt_sizes_attempt_{attempt}.json",
+            repair_budget_report,
+        )
+        log_agent_prompt(
+            "verilog_coding_repair",
+            f"{task_id}_{attempt}",
+            repair_system_prompt,
+            repair_human_template,
+            repair_payload,
+        )
+        repair_response = (repair_prompt | llm).invoke(repair_payload)
         write_text_artifact(
             f"logs/{task_id}_coding_repair_raw_attempt_{state.get('coding_retry_count', 0) + 1}.txt",
             repair_response.content,
@@ -1641,15 +1926,8 @@ def microarchitecture_reviewer_agent(state: AgentState):
         previous_feedback,
     )
 
-    prompt = ChatPromptTemplate.from_messages(
-        [
-            (
-                "system",
-                load_prompt("microarchitecture_review.md"),
-            ),
-            (
-                "human",
-                """
+    system_prompt = load_prompt("microarchitecture_review.md")
+    human_template = """
 Architecture contract:
 {architecture_contract}
 
@@ -1673,24 +1951,39 @@ Previous coding repair backlog:
 
 RTL candidate:
 {candidate_rtl}
-""",
+"""
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            (
+                "system",
+                system_prompt,
+            ),
+            (
+                "human",
+                human_template,
             ),
         ]
     )
-    response = (prompt | llm).invoke(
-        {
-            "architecture_contract": state.get("architecture_contract") or "(none)",
-            "task": render_manager_task(task),
-            "manager_handoff": current_manager_handoff(state),
-            "supervisor_plan": state["supervisor_plan"],
-            "control_datapath_plan": state.get("control_datapath_plan") or "(none)",
-            "static_report": static_result["report"],
-            "previous_feedback": previous_feedback,
-            "candidate_rtl": render_files_for_prompt(
-                merged_files, state.get("max_context_chars", 120_000)
-            ),
-        }
+    payload = {
+        "architecture_contract": state.get("architecture_contract") or "(none)",
+        "task": render_manager_task(task),
+        "manager_handoff": current_manager_handoff(state),
+        "supervisor_plan": state["supervisor_plan"],
+        "control_datapath_plan": state.get("control_datapath_plan") or "(none)",
+        "static_report": static_result["report"],
+        "previous_feedback": previous_feedback,
+        "candidate_rtl": render_files_for_prompt(
+            merged_files, state.get("max_context_chars", 120_000)
+        ),
+    }
+    log_agent_prompt(
+        "microarchitecture_review",
+        f"{task_id}_{state.get('microarchitecture_retry_count', 0) + 1}",
+        system_prompt,
+        human_template,
+        payload,
     )
+    response = (prompt | llm).invoke(payload)
 
     passed, report, decision_details = parse_review_result_with_details(
         response.content, "Microarchitecture review output was not valid JSON."

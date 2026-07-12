@@ -17,6 +17,11 @@ Pass policy:
 - FAIL only for blocking gaps that prevent coding the current task, such as missing required state sequencing, missing required datapath storage/arithmetic, missing reset behavior, or contradictory timing/interface instructions.
 - Do not fail merely because a generic category like FIFO, backpressure, overflow, or FSM is N/A for this design.
 
+When reporting FAIL:
+- Name the exact Control/Data Path section and downstream RTL target to repair.
+- Include `required_fix:` items for control logic, datapath logic, reset/timing, or verification focus as applicable.
+- Include still-unresolved earlier findings together with newly discovered blocking findings.
+
 Return only raw JSON:
 {{
   "pass": true|false,

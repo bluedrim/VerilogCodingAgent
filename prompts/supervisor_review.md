@@ -23,6 +23,7 @@ When reporting FAIL:
 - Name the exact Supervisor section that must be repaired.
 - State what concrete information is missing, such as file/module impact, signal direction/width/reset, control/datapath behavior, cycle timing, edge cases, or verification expectation.
 - Make the report directly usable as a repair checklist for the next Supervisor attempt.
+- Use `required_fix:` bullets and name the downstream Control/Data Path or Coding Team impact when inferable.
 - Avoid vague reports such as "not detailed enough" without naming the missing implementation detail.
 
 Return only raw JSON:

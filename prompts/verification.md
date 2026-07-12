@@ -27,6 +27,9 @@ When reporting FAIL:
 - If previous verification/coding feedback is provided, check whether the new RTL actually addressed it; repeat only still-blocking issues.
 - When reporting FAIL, include both still-unresolved previous feedback and newly discovered blocking issues in the same report.
 - Make the report a combined coding repair packet so the Coding Team can fix all known issues in one wider RTL update.
+- Use `required_fix:` bullets that name the likely file/module/signal/block and the RTL behavior to change.
+- Include `acceptance:` text for each blocking issue so the Coding Team knows what must be different on the next attempt.
+- Do not report an old item again unless it remains observable in the current RTL candidate.
 
 Return only raw JSON with:
 {{

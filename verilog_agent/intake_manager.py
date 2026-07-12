@@ -42,16 +42,20 @@ def intake_agent(state: AgentState):
 @_with_runtime
 def manager_agent(state: AgentState):
     print("---MANAGER: Creating Top-Level RTL Plan---")
+    system_prompt = load_prompt("manager.md")
+    human_template = "User requirement:\n{user_request}"
     prompt = ChatPromptTemplate.from_messages(
         [
             (
                 "system",
-                load_prompt("manager.md"),
+                system_prompt,
             ),
-            ("human", "User requirement:\n{user_request}"),
+            ("human", human_template),
         ]
     )
-    response = (prompt | llm).invoke({"user_request": state["user_request"]})
+    payload = {"user_request": state["user_request"]}
+    log_agent_prompt("manager", 1, system_prompt, human_template, payload)
+    response = (prompt | llm).invoke(payload)
     write_text_artifact("logs/manager_plan_raw_attempt_1.txt", response.content)
 
     try:
@@ -67,15 +71,8 @@ def manager_agent(state: AgentState):
         }
     except (json.JSONDecodeError, ValueError) as exc:
         print(f"---WARNING: Manager produced invalid plan, attempting repair: {exc}---")
-        repair_prompt = ChatPromptTemplate.from_messages(
-            [
-                (
-                    "system",
-                    load_prompt("manager_json_repair.md"),
-                ),
-                (
-                    "human",
-                    """
+        repair_system_prompt = load_prompt("manager_json_repair.md")
+        repair_human_template = """
 Original user requirement:
 {user_request}
 
@@ -84,17 +81,32 @@ Invalid Manager output:
 
 Parser error:
 {parser_error}
-""",
+"""
+        repair_prompt = ChatPromptTemplate.from_messages(
+            [
+                (
+                    "system",
+                    repair_system_prompt,
+                ),
+                (
+                    "human",
+                    repair_human_template,
                 ),
             ]
         )
-        repair_response = (repair_prompt | llm).invoke(
-            {
-                "user_request": state["user_request"],
-                "invalid_output": response.content,
-                "parser_error": str(exc),
-            }
+        repair_payload = {
+            "user_request": state["user_request"],
+            "invalid_output": response.content,
+            "parser_error": str(exc),
+        }
+        log_agent_prompt(
+            "manager_json_repair",
+            1,
+            repair_system_prompt,
+            repair_human_template,
+            repair_payload,
         )
+        repair_response = (repair_prompt | llm).invoke(repair_payload)
         write_text_artifact("logs/manager_plan_repair_raw_attempt_1.txt", repair_response.content)
         try:
             plan = parse_manager_plan_response(

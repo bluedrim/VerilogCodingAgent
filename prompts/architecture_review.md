@@ -27,6 +27,11 @@ Pass policy:
 - FAIL only for blocking gaps that prevent RTL coding, such as missing top/interface/reset/control/datapath decisions for an explicit requirement.
 - Do not fail merely because a generic category like backpressure, overflow, CDC, memory, or pipelining is N/A for this design.
 
+When reporting FAIL:
+- Name the exact contract section to repair.
+- Include `required_fix:` items that the Architect can copy into the next architecture revision checklist.
+- Distinguish still-blocking missing information from non-blocking suggestions.
+
 Return only raw JSON:
 {{
   "pass": true|false,

@@ -39,15 +39,8 @@ def control_datapath_planner_agent(state: AgentState):
         "Control/Data Path plan",
         state.get("max_context_chars", 120_000),
     )
-    prompt = ChatPromptTemplate.from_messages(
-        [
-            (
-                "system",
-                load_prompt("control_datapath_planner.md"),
-            ),
-            (
-                "human",
-                """
+    system_prompt = load_prompt("control_datapath_planner.md")
+    human_template = """
 Original user requirement:
 {user_request}
 
@@ -79,28 +72,43 @@ Control/Data Path reviewer revision checklist:
 {revision_checklist}
 
 {review_feedback}
-""",
+"""
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            (
+                "system",
+                system_prompt,
+            ),
+            (
+                "human",
+                human_template,
             ),
         ]
     )
-    response = (prompt | llm).invoke(
-        {
-            "user_request": state["user_request"],
-            "architecture_contract": state.get("architecture_contract") or "(none)",
-            "task": render_manager_task(task),
-            "manager_handoff": current_manager_handoff(state),
-            "supervisor_plan": state["supervisor_plan"],
-            "rtl_context": clip_text(
-                state.get("rtl_context") or "(none)",
-                state.get("max_context_chars", 120_000),
-            ),
-            "previous_control_datapath_plan": state.get("control_datapath_plan") or "(none)",
-            "verification_report": state.get("verification_report") or "(none)",
-            "revision_mode": revision_mode,
-            "revision_checklist": revision_checklist,
-            "review_feedback": review_feedback,
-        }
+    payload = {
+        "user_request": state["user_request"],
+        "architecture_contract": state.get("architecture_contract") or "(none)",
+        "task": render_manager_task(task),
+        "manager_handoff": current_manager_handoff(state),
+        "supervisor_plan": state["supervisor_plan"],
+        "rtl_context": clip_text(
+            state.get("rtl_context") or "(none)",
+            state.get("max_context_chars", 120_000),
+        ),
+        "previous_control_datapath_plan": state.get("control_datapath_plan") or "(none)",
+        "verification_report": state.get("verification_report") or "(none)",
+        "revision_mode": revision_mode,
+        "revision_checklist": revision_checklist,
+        "review_feedback": review_feedback,
+    }
+    log_agent_prompt(
+        "control_datapath_planner",
+        f"{task_id}_{state.get('control_datapath_retry_count', 0) + 1}",
+        system_prompt,
+        human_template,
+        payload,
     )
+    response = (prompt | llm).invoke(payload)
     write_text_artifact(
         f"logs/{task_id}_control_datapath_plan.md",
         response.content,
@@ -147,15 +155,8 @@ def control_datapath_review_agent(state: AgentState):
     task = current_manager_task(state)
     task_id = sanitize_artifact_name(task.get("id"), "task")
     print(f"---CONTROL/DATAPATH REVIEW: Checking micro-architecture plan for {task['id']}---")
-    prompt = ChatPromptTemplate.from_messages(
-        [
-            (
-                "system",
-                load_prompt("control_datapath_review.md"),
-            ),
-            (
-                "human",
-                """
+    system_prompt = load_prompt("control_datapath_review.md")
+    human_template = """
 Original user requirement:
 {user_request}
 
@@ -170,19 +171,34 @@ Supervisor task packet:
 
 Control/Data Path plan:
 {control_datapath_plan}
-""",
+"""
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            (
+                "system",
+                system_prompt,
+            ),
+            (
+                "human",
+                human_template,
             ),
         ]
     )
-    response = (prompt | llm).invoke(
-        {
-            "user_request": state["user_request"],
-            "architecture_contract": state.get("architecture_contract") or "(none)",
-            "manager_handoff": current_manager_handoff(state),
-            "supervisor_plan": state.get("supervisor_plan") or "(none)",
-            "control_datapath_plan": state.get("control_datapath_plan") or "(none)",
-        }
+    payload = {
+        "user_request": state["user_request"],
+        "architecture_contract": state.get("architecture_contract") or "(none)",
+        "manager_handoff": current_manager_handoff(state),
+        "supervisor_plan": state.get("supervisor_plan") or "(none)",
+        "control_datapath_plan": state.get("control_datapath_plan") or "(none)",
+    }
+    log_agent_prompt(
+        "control_datapath_review",
+        f"{task_id}_{state.get('control_datapath_retry_count', 0) + 1}",
+        system_prompt,
+        human_template,
+        payload,
     )
+    response = (prompt | llm).invoke(payload)
 
     passed, report, decision_details = parse_review_result_with_details(
         response.content, "Control/Data Path review output was not valid JSON."

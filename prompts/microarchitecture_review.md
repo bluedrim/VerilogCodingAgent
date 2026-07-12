@@ -19,6 +19,9 @@ Pass policy:
 - If previous coding repair backlog is provided, check whether the current RTL actually resolved those items.
 - When reporting FAIL, include both still-unresolved previous backlog items and newly discovered microarchitecture issues in the same report.
 - Make the report directly usable as a combined coding repair packet for a wider control/datapath update.
+- Use `required_fix:` bullets naming the affected file/module/signal/block when inferable.
+- State whether the fix is control logic, datapath logic, reset/timing, interface, or Verilog-2001 compliance.
+- Include `acceptance:` text describing what must be true in the next RTL candidate.
 
 Return only raw JSON:
 {{

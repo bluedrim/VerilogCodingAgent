@@ -179,15 +179,8 @@ def verification_team_agent(state: AgentState):
         candidate_summary,
     )
 
-    prompt = ChatPromptTemplate.from_messages(
-        [
-            (
-                "system",
-                load_prompt("verification.md"),
-            ),
-            (
-                "human",
-                """
+    system_prompt = load_prompt("verification.md")
+    human_template = """
 Original user requirement:
 {user_request}
 
@@ -214,25 +207,40 @@ Previous verification/coding feedback, if any:
 
 RTL candidate to verify:
 {candidate_rtl}
-""",
+"""
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            (
+                "system",
+                system_prompt,
+            ),
+            (
+                "human",
+                human_template,
             ),
         ]
     )
-    response = (prompt | llm).invoke(
-        {
-            "user_request": state["user_request"],
-            "architecture_contract": state.get("architecture_contract") or "(none)",
-            "task": render_manager_task(task),
-            "manager_handoff": current_manager_handoff(state),
-            "supervisor_plan": state["supervisor_plan"],
-            "control_datapath_plan": state.get("control_datapath_plan") or "(none)",
-            "candidate_summary": candidate_summary,
-            "previous_feedback": previous_feedback,
-            "candidate_rtl": render_files_for_prompt(
-                merged_files, state.get("max_context_chars", 120_000)
-            ),
-        }
+    payload = {
+        "user_request": state["user_request"],
+        "architecture_contract": state.get("architecture_contract") or "(none)",
+        "task": render_manager_task(task),
+        "manager_handoff": current_manager_handoff(state),
+        "supervisor_plan": state["supervisor_plan"],
+        "control_datapath_plan": state.get("control_datapath_plan") or "(none)",
+        "candidate_summary": candidate_summary,
+        "previous_feedback": previous_feedback,
+        "candidate_rtl": render_files_for_prompt(
+            merged_files, state.get("max_context_chars", 120_000)
+        ),
+    }
+    log_agent_prompt(
+        "verification",
+        f"{task_id}_{state.get('verification_retry_count', 0) + 1}",
+        system_prompt,
+        human_template,
+        payload,
     )
+    response = (prompt | llm).invoke(payload)
 
     passed, report, decision_details = parse_review_result_with_details(
         response.content,

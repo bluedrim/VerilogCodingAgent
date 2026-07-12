@@ -43,15 +43,8 @@ def testbench_team_agent(state: AgentState):
         "testbench files",
         state.get("max_context_chars", 120_000),
     )
-    prompt = ChatPromptTemplate.from_messages(
-        [
-            (
-                "system",
-                load_prompt("testbench.md"),
-            ),
-            (
-                "human",
-                """
+    system_prompt = load_prompt("testbench.md")
+    human_template = """
 Original user requirement:
 {user_request}
 
@@ -71,25 +64,40 @@ Testbench revision checklist:
 {revision_checklist}
 
 {feedback}
-""",
+"""
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            (
+                "system",
+                system_prompt,
+            ),
+            (
+                "human",
+                human_template,
             ),
         ]
     )
-    response = (prompt | llm).invoke(
-        {
-            "user_request": state["user_request"],
-            "rtl_context": render_files_for_prompt(
-                state.get("final_files", []), state.get("max_context_chars", 120_000)
-            ),
-            "top_module_candidates": ", ".join(state.get("top_module_candidates", [])) or "(unknown)",
-            "previous_testbench_files": render_files_for_prompt(
-                state.get("testbench_files", []), state.get("max_context_chars", 120_000)
-            ),
-            "revision_mode": revision_mode,
-            "revision_checklist": revision_checklist,
-            "feedback": feedback,
-        }
+    payload = {
+        "user_request": state["user_request"],
+        "rtl_context": render_files_for_prompt(
+            state.get("final_files", []), state.get("max_context_chars", 120_000)
+        ),
+        "top_module_candidates": ", ".join(state.get("top_module_candidates", [])) or "(unknown)",
+        "previous_testbench_files": render_files_for_prompt(
+            state.get("testbench_files", []), state.get("max_context_chars", 120_000)
+        ),
+        "revision_mode": revision_mode,
+        "revision_checklist": revision_checklist,
+        "feedback": feedback,
+    }
+    log_agent_prompt(
+        "testbench",
+        state.get("testbench_retry_count", 0) + 1,
+        system_prompt,
+        human_template,
+        payload,
     )
+    response = (prompt | llm).invoke(payload)
     attempt = state.get("testbench_retry_count", 0) + 1
     write_text_artifact(
         f"logs/testbench_raw_attempt_{attempt}.txt",

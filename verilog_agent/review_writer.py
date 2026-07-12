@@ -226,6 +226,7 @@ def summary_agent(state: AgentState):
             "final_lint": state.get("max_testbench_retries", 0),
         },
         "logs_dir": str(ARTIFACT_DIR / "logs"),
+        "agent_message_snapshots_dir": str(ARTIFACT_DIR / "logs" / "agent_messages"),
         "failed_attempts_dir": str(ARTIFACT_DIR / "failed_attempts"),
     }
     all_files = state.get("final_files", []) + state.get("testbench_files", [])

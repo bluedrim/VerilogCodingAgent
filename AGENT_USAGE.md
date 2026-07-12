@@ -175,7 +175,11 @@ Current prompt files:
 - `prompts/control_datapath_planner.md`
 - `prompts/control_datapath_review.md`
 - `prompts/verilog_coding.md`
+- `prompts/verilog_coding_action_plan.md`
+- `prompts/verilog_implementation_repair.md`
 - `prompts/verilog_coding_repair.md`
+- `prompts/verilog_review_gate_repair.md`
+- `prompts/verilog_coding_closure_review.md`
 - `prompts/microarchitecture_review.md`
 - `prompts/verification.md`
 - `prompts/testbench.md`
@@ -194,17 +198,30 @@ Important artifacts:
 - `<artifact-dir>/dashboard_heartbeat.json`
 - `<artifact-dir>/manager_plan.json`
 - `<artifact-dir>/architecture_contract.md`
+- `<artifact-dir>/logs/agent_messages/*_attempt_*.md`
 - `<artifact-dir>/logs/architecture_review_attempt_*.md`
 - `<artifact-dir>/logs/*_supervisor_review_attempt_*.md`
 - `<artifact-dir>/logs/*_control_datapath_plan.md`
 - `<artifact-dir>/logs/*_control_datapath_review_attempt_*.md`
 - `<artifact-dir>/logs/*_coding_attempt_*.json`
+- `<artifact-dir>/logs/*_coding_closure_audit_*_attempt_*.md`
 - `<artifact-dir>/logs/*_microarchitecture_review_attempt_*.md`
 - `<artifact-dir>/compile_order.f`
 - `<artifact-dir>/file_manifest.json`
 - `<artifact-dir>/run_summary.json`
 - `<artifact-dir>/logs/`
 - `<artifact-dir>/failed_attempts/`
+
+Agent message snapshots under `logs/agent_messages/` show the rendered
+system/human input sent to each agent, payload sizes, and links to externalized
+RTL/code payloads. This keeps prompt text reviewable without burying it inside
+large code bodies. Set `AGENT_MESSAGE_LOG_MAX_CHARS` to cap the rendered
+message preview length; code payload artifacts are still written separately.
+
+On review-driven coding retries, the Coding Closure Auditor checks whether the
+current RTL visibly closes the active repair backlog. A failed closure audit is
+fed into the focused review-gate repair pass, and the repaired RTL is audited
+once more before it can proceed to Microarchitecture Review.
 
 If `verilator` or `iverilog` is installed, syntax lint runs automatically. If neither
 tool is available, lint is skipped and the skip is recorded in the logs. Use
