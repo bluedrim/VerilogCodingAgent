@@ -355,6 +355,7 @@ HTML = r"""<!doctype html>
     </div>
     <div class="toolbar">
       <select id="runSelect" aria-label="Run selector"></select>
+      <button id="continueBtn" type="button" disabled>Continue</button>
       <button id="refreshBtn" type="button">Refresh</button>
       <span id="autoState" class="pill info">Auto 2s</span>
     </div>
@@ -443,8 +444,10 @@ HTML = r"""<!doctype html>
     const specFile = document.getElementById("specFile");
     const startBtn = document.getElementById("startBtn");
     const startStatus = document.getElementById("startStatus");
+    const continueBtn = document.getElementById("continueBtn");
 
     document.getElementById("refreshBtn").addEventListener("click", () => refreshAll(true));
+    continueBtn.addEventListener("click", continueRun);
     runSelect.addEventListener("change", () => {
       state.selected = runSelect.value;
       refreshRun();
@@ -521,6 +524,27 @@ HTML = r"""<!doctype html>
       }
     }
 
+    async function continueRun() {
+      if (!state.selected || !state.lastRun || !state.lastRun.can_continue) return;
+      const payload = {
+        dir: state.selected,
+        llmProvider: document.getElementById("llmProvider").value
+      };
+      continueBtn.disabled = true;
+      startStatus.textContent = `Continuing ${state.selected}...`;
+      try {
+        const result = await postJson("/api/continue", payload);
+        startStatus.textContent = `Continued PID ${result.pid} from ${result.resume_stage}`;
+        await refreshAll(false);
+      } catch (err) {
+        startStatus.textContent = `Continue failed: ${err.message}`;
+      } finally {
+        if (state.lastRun) {
+          continueBtn.disabled = !state.lastRun.can_continue || state.lastRun.active;
+        }
+      }
+    }
+
     async function refreshAll(forceLatest = false) {
       try {
         const data = await getJson("/api/runs");
@@ -575,11 +599,18 @@ HTML = r"""<!doctype html>
       artifactList.innerHTML = '<div class="empty">No artifacts.</div>';
       failedList.innerHTML = '<div class="empty">No failed attempts.</div>';
       latestReport.textContent = "No run selected.";
+      continueBtn.disabled = true;
+      continueBtn.title = "Select a resumable run.";
     }
 
     function renderRun(run) {
       const active = run.active ? "active" : "idle";
-      subtitle.textContent = `${run.path} | ${active} | updated ${fmt(run.updated_at, "unknown")}`;
+      const resume = run.resume_stage ? ` | resume ${run.resume_stage}` : "";
+      subtitle.textContent = `${run.path} | ${active}${resume} | updated ${fmt(run.updated_at, "unknown")}`;
+      continueBtn.disabled = !run.can_continue || run.active;
+      continueBtn.title = run.active
+        ? "This run is already active."
+        : (run.can_continue ? `Continue from ${run.resume_stage}` : (run.continue_reason || "No pending work."));
       const statusClass = clsStatus(run.status_code || "pending");
       metrics.innerHTML = [
         metric("Run Status", `<span class="pill ${statusClass}">${escapeHtml(run.status)}</span>`, run.run_id || run.name),
@@ -743,6 +774,37 @@ def discover_runs(root: Path) -> list[Path]:
     return sorted(candidates, key=lambda item: item.stat().st_mtime, reverse=True)
 
 
+def pid_is_running(pid: object) -> bool:
+    try:
+        numeric_pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if numeric_pid <= 0:
+        return False
+    try:
+        waited_pid, _ = os.waitpid(numeric_pid, os.WNOHANG)
+        if waited_pid == numeric_pid:
+            return False
+        return True
+    except ChildProcessError:
+        try:
+            os.kill(numeric_pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+
+
+def run_process_is_active(run_dir: Path, heartbeat: dict | None) -> bool:
+    if heartbeat and heartbeat.get("process_id"):
+        return pid_is_running(heartbeat.get("process_id"))
+    job = json_read(run_dir / "dashboard_job.json", {}) or {}
+    if job.get("pid"):
+        return pid_is_running(job.get("pid"))
+    return heartbeat_is_recent(heartbeat)
+
+
 def run_status(run_dir: Path, summary: dict | None, heartbeat: dict | None) -> tuple[str, str, bool]:
     status = ""
     code = "pending"
@@ -764,8 +826,9 @@ def run_status(run_dir: Path, summary: dict | None, heartbeat: dict | None) -> t
             code = "running"
         else:
             status = "incomplete"
-    active = heartbeat_is_recent(heartbeat)
-    if active and code == "pending":
+    active = run_process_is_active(run_dir, heartbeat)
+    if active:
+        status = "running"
         code = "running"
     return status, code, active
 
@@ -872,6 +935,7 @@ def build_stages(snapshot: dict | None, summary: dict | None, artifacts: list[di
 def build_run_summary(root: Path, run_dir: Path) -> dict:
     summary = json_read(run_dir / "run_summary.json", {}) or {}
     snapshot = json_read(run_dir / "run_progress_snapshot.json", {}) or {}
+    checkpoint = json_read(run_dir / "run_state_checkpoint.json", {}) or {}
     execution = json_read(run_dir / "execution_config.json", {}) or {}
     llm = json_read(run_dir / "llm_config.json", {}) or execution.get("llm_config", {}) or {}
     heartbeat = json_read(run_dir / "dashboard_heartbeat.json", {}) or {}
@@ -879,6 +943,16 @@ def build_run_summary(root: Path, run_dir: Path) -> dict:
     failed = list_files(run_dir, "failed_attempts", 80)
     artifact_count, failed_count = artifact_counts(run_dir)
     status, status_code, active = run_status(run_dir, summary, heartbeat)
+    resume_stage = str(checkpoint.get("resume_stage") or "")
+    can_continue = bool(checkpoint and resume_stage and not active)
+    if active:
+        continue_reason = "This run is already active."
+    elif not checkpoint:
+        continue_reason = "No continuation checkpoint is available for this run."
+    elif not resume_stage:
+        continue_reason = "This run is complete and has no pending stage."
+    else:
+        continue_reason = ""
     manager_task_count = int(
         snapshot.get("manager_task_count")
         or summary.get("manager_task_count")
@@ -899,6 +973,11 @@ def build_run_summary(root: Path, run_dir: Path) -> dict:
         "status": status,
         "status_code": status_code,
         "active": active,
+        "can_continue": can_continue,
+        "continue_reason": continue_reason,
+        "resume_stage": resume_stage,
+        "checkpoint_phase": checkpoint.get("phase") or "",
+        "checkpoint_saved_at": checkpoint.get("saved_at") or "",
         "run_id": summary.get("run_id") or execution.get("run_id") or "",
         "updated_at": heartbeat.get("updated_at") or iso_from_mtime(run_dir),
         "artifact_count": artifact_count,
@@ -1006,7 +1085,31 @@ def start_agent_run(root: Path, payload: dict) -> dict:
     spec_path = artifact_dir / spec_filename
     spec_path.write_text(spec_text, encoding="utf-8")
 
-    max_retries = env_int(("DASHBOARD_MAX_RETRIES", "MAX_RETRIES"), 10, 0, 999)
+    max_retries = env_int(("DASHBOARD_MAX_RETRIES", "MAX_RETRIES"), 3, 0, 999)
+    max_architecture_retries = env_int(
+        ("DASHBOARD_MAX_ARCHITECTURE_RETRIES", "MAX_ARCHITECTURE_RETRIES"),
+        max_retries,
+        0,
+        999,
+    )
+    max_supervisor_retries = env_int(
+        ("DASHBOARD_MAX_SUPERVISOR_RETRIES", "MAX_SUPERVISOR_RETRIES"),
+        max_retries,
+        0,
+        999,
+    )
+    max_control_datapath_retries = env_int(
+        ("DASHBOARD_MAX_CONTROL_DATAPATH_RETRIES", "MAX_CONTROL_DATAPATH_RETRIES"),
+        max_retries,
+        0,
+        999,
+    )
+    max_testbench_retries = env_int(
+        ("DASHBOARD_MAX_TESTBENCH_RETRIES", "MAX_TESTBENCH_RETRIES"),
+        max_retries,
+        0,
+        999,
+    )
     max_tasks = env_int(("DASHBOARD_MAX_MANAGER_TASKS", "MAX_MANAGER_TASKS"), 32, 1, 128)
     command = [
         sys.executable,
@@ -1018,13 +1121,13 @@ def start_agent_run(root: Path, payload: dict) -> dict:
         "--max-retries",
         str(max_retries),
         "--max-architecture-retries",
-        str(max_retries),
+        str(max_architecture_retries),
         "--max-supervisor-retries",
-        str(max_retries),
+        str(max_supervisor_retries),
         "--max-control-datapath-retries",
-        str(max_retries),
+        str(max_control_datapath_retries),
         "--max-testbench-retries",
-        str(max_retries),
+        str(max_testbench_retries),
         "--max-manager-tasks",
         str(max_tasks),
     ]
@@ -1060,6 +1163,7 @@ def start_agent_run(root: Path, payload: dict) -> dict:
 
     job = {
         "pid": process.pid,
+        "created_at": datetime.now(timezone.utc).isoformat(),
         "started_at": datetime.now(timezone.utc).isoformat(),
         "artifact_dir": artifact_dir.name,
         "artifact_dir_path": str(artifact_dir),
@@ -1071,6 +1175,10 @@ def start_agent_run(root: Path, payload: dict) -> dict:
             "no_testbench": no_testbench,
             "require_lint": require_lint,
             "max_retries": max_retries,
+            "max_architecture_retries": max_architecture_retries,
+            "max_supervisor_retries": max_supervisor_retries,
+            "max_control_datapath_retries": max_control_datapath_retries,
+            "max_testbench_retries": max_testbench_retries,
             "max_manager_tasks": max_tasks,
             "llm_provider": str(payload.get("llmProvider") or ""),
         },
@@ -1084,6 +1192,160 @@ def start_agent_run(root: Path, payload: dict) -> dict:
         "artifact_dir": artifact_dir.name,
         "artifact_dir_name": artifact_dir.name,
         "spec_file": spec_path.name,
+        "stdout_log": stdout_path.name,
+    }
+
+
+def continue_agent_run(root: Path, payload: dict) -> dict:
+    run_name = str(payload.get("dir") or "").strip()
+    run_dir = safe_run_dir(root, run_name)
+    checkpoint = json_read(run_dir / "run_state_checkpoint.json", {}) or {}
+    if not checkpoint:
+        raise ValueError("The selected run has no continuation checkpoint.")
+    resume_stage = str(checkpoint.get("resume_stage") or "")
+    if not resume_stage:
+        raise ValueError("The selected run is complete and has no pending stage.")
+    heartbeat = json_read(run_dir / "dashboard_heartbeat.json", {}) or {}
+    if run_process_is_active(run_dir, heartbeat):
+        raise ValueError("The selected run is already active.")
+
+    max_retries = env_int(("DASHBOARD_MAX_RETRIES", "MAX_RETRIES"), 3, 0, 999)
+    max_architecture_retries = env_int(
+        ("DASHBOARD_MAX_ARCHITECTURE_RETRIES", "MAX_ARCHITECTURE_RETRIES"),
+        max_retries,
+        0,
+        999,
+    )
+    max_supervisor_retries = env_int(
+        ("DASHBOARD_MAX_SUPERVISOR_RETRIES", "MAX_SUPERVISOR_RETRIES"),
+        max_retries,
+        0,
+        999,
+    )
+    max_control_datapath_retries = env_int(
+        ("DASHBOARD_MAX_CONTROL_DATAPATH_RETRIES", "MAX_CONTROL_DATAPATH_RETRIES"),
+        max_retries,
+        0,
+        999,
+    )
+    max_testbench_retries = env_int(
+        ("DASHBOARD_MAX_TESTBENCH_RETRIES", "MAX_TESTBENCH_RETRIES"),
+        max_retries,
+        0,
+        999,
+    )
+    max_tasks = env_int(("DASHBOARD_MAX_MANAGER_TASKS", "MAX_MANAGER_TASKS"), 32, 1, 128)
+    command = [
+        sys.executable,
+        str(root / "main.py"),
+        "--continue",
+        "--artifact-dir",
+        str(run_dir),
+        "--max-retries",
+        str(max_retries),
+        "--max-architecture-retries",
+        str(max_architecture_retries),
+        "--max-supervisor-retries",
+        str(max_supervisor_retries),
+        "--max-control-datapath-retries",
+        str(max_control_datapath_retries),
+        "--max-testbench-retries",
+        str(max_testbench_retries),
+        "--max-manager-tasks",
+        str(max_tasks),
+    ]
+
+    auto_approve = env_bool(("DASHBOARD_AUTO_APPROVE", "AUTO_APPROVE_FINAL"), True)
+    no_testbench = env_bool(("DASHBOARD_NO_TESTBENCH", "NO_TESTBENCH"), False)
+    require_lint = env_bool(("DASHBOARD_REQUIRE_LINT", "REQUIRE_LINT"), False)
+    if auto_approve:
+        command.append("--auto-approve")
+    if no_testbench:
+        command.append("--no-testbench")
+    if require_lint:
+        command.append("--require-lint")
+
+    llm_provider = str(payload.get("llmProvider") or "").strip()
+    if llm_provider:
+        command.extend(["--llm-provider", llm_provider])
+
+    stdout_path = run_dir / "dashboard_stdout.log"
+    stdout_handle = stdout_path.open("ab")
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=str(root),
+            env=os.environ.copy(),
+            stdout=stdout_handle,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    finally:
+        stdout_handle.close()
+
+    started_at = datetime.now(timezone.utc).isoformat()
+    previous_job = json_read(run_dir / "dashboard_job.json", {}) or {}
+    continuation_event = {
+        "pid": process.pid,
+        "started_at": started_at,
+        "resume_stage": resume_stage,
+        "command": redacted_command(command, {}),
+    }
+    continuation_history = list(previous_job.get("continuations", []))
+    continuation_history.append(continuation_event)
+    job = dict(previous_job)
+    job.update(
+        {
+            "pid": process.pid,
+            "created_at": previous_job.get("created_at")
+            or previous_job.get("started_at")
+            or started_at,
+            "started_at": started_at,
+            "artifact_dir": run_dir.name,
+            "artifact_dir_path": str(run_dir),
+            "stdout_log": stdout_path.name,
+            "command": redacted_command(command, {}),
+            "resume_stage": resume_stage,
+            "continuation_count": len(continuation_history),
+            "continuations": continuation_history,
+            "options": {
+                "auto_approve": auto_approve,
+                "no_testbench": no_testbench,
+                "require_lint": require_lint,
+                "max_retries": max_retries,
+                "max_architecture_retries": max_architecture_retries,
+                "max_supervisor_retries": max_supervisor_retries,
+                "max_control_datapath_retries": max_control_datapath_retries,
+                "max_testbench_retries": max_testbench_retries,
+                "max_manager_tasks": max_tasks,
+                "llm_provider": llm_provider,
+            },
+        }
+    )
+    (run_dir / "dashboard_job.json").write_text(
+        json.dumps(job, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    (run_dir / "dashboard_heartbeat.json").write_text(
+        json.dumps(
+            {
+                "updated_at": started_at,
+                "artifact_dir": str(run_dir),
+                "process_id": process.pid,
+                "last_artifact": "dashboard_job.json",
+                "last_artifact_path": str(run_dir / "dashboard_job.json"),
+                "last_artifact_bytes": (run_dir / "dashboard_job.json").stat().st_size,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    return {
+        "pid": process.pid,
+        "artifact_dir": run_dir.name,
+        "artifact_dir_name": run_dir.name,
+        "resume_stage": resume_stage,
         "stdout_log": stdout_path.name,
     }
 
@@ -1135,6 +1397,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
         try:
             if parsed.path == "/api/start":
                 self.handle_start()
+            elif parsed.path == "/api/continue":
+                self.handle_continue()
             else:
                 self.send_error(HTTPStatus.NOT_FOUND.value, "Not found")
         except (json.JSONDecodeError, ValueError) as exc:
@@ -1157,6 +1421,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def handle_start(self):
         payload = self.read_json_body()
         result = start_agent_run(self.root, payload)
+        self.send_json(result, HTTPStatus.CREATED)
+
+    def handle_continue(self):
+        payload = self.read_json_body()
+        result = continue_agent_run(self.root, payload)
         self.send_json(result, HTTPStatus.CREATED)
 
     def handle_runs(self):

@@ -97,7 +97,7 @@ def verification_team_agent(state: AgentState):
             repair_packet,
         )
         next_retry_count = state.get("verification_retry_count", 0) + 1
-        force_forward_after = state.get("max_retries", 10)
+        force_forward_after = state.get("max_retries", DEFAULT_MAX_RETRIES)
         force_forward = bool(force_forward_after and next_retry_count >= force_forward_after)
         if force_forward:
             print("---VERIFICATION TEAM: FORCE-FORWARD THRESHOLD REACHED AFTER BASIC SANITY FAIL---")
@@ -146,7 +146,7 @@ def verification_team_agent(state: AgentState):
             repair_packet,
         )
         next_retry_count = state.get("verification_retry_count", 0) + 1
-        force_forward_after = state.get("max_retries", 10)
+        force_forward_after = state.get("max_retries", DEFAULT_MAX_RETRIES)
         force_forward = bool(force_forward_after and next_retry_count >= force_forward_after)
         if force_forward:
             print("---VERIFICATION TEAM: FORCE-FORWARD THRESHOLD REACHED AFTER LINT FAIL---")
@@ -289,7 +289,7 @@ RTL candidate to verify:
         repair_packet,
     )
     next_retry_count = state.get("verification_retry_count", 0) + 1
-    force_forward_after = state.get("max_retries", 10)
+    force_forward_after = state.get("max_retries", DEFAULT_MAX_RETRIES)
     force_forward = bool(force_forward_after and next_retry_count >= force_forward_after)
     if force_forward:
         print("---VERIFICATION TEAM: FORCE-FORWARD THRESHOLD REACHED---")

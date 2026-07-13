@@ -47,6 +47,12 @@ You can also start a new run directly from the dashboard:
 - Select only the LLM provider in the dashboard.
 - Click `Start Run`.
 
+To continue an interrupted or failed run, select its output directory and click
+`Continue`. The button is enabled only when a saved checkpoint has pending work
+and no process is already running for that directory. The agent restores the
+Manager plan, current task, review feedback, RTL candidates, accepted files, and
+retry counters, then enters the stage following the last completed node.
+
 The dashboard saves the submitted Markdown/text as `dashboard_requirement.md`
 inside the new `output_*` artifact directory and starts `main.py` in the
 background with final write approval enabled so the non-interactive run does
@@ -60,7 +66,12 @@ Dashboard `.env` controls:
 DASHBOARD_AUTO_APPROVE=true
 DASHBOARD_NO_TESTBENCH=false
 DASHBOARD_REQUIRE_LINT=false
-DASHBOARD_MAX_RETRIES=10
+MAX_RETRIES=3
+# DASHBOARD_MAX_RETRIES=3
+# DASHBOARD_MAX_ARCHITECTURE_RETRIES=3
+# DASHBOARD_MAX_SUPERVISOR_RETRIES=3
+# DASHBOARD_MAX_CONTROL_DATAPATH_RETRIES=3
+# DASHBOARD_MAX_TESTBENCH_RETRIES=3
 DASHBOARD_MAX_MANAGER_TASKS=32
 ```
 
@@ -136,12 +147,13 @@ LLM_TEMPERATURE=0.1
 Options:
 
 - `--spec`: RTL requirement text or a path to a requirement file.
+- `--continue`: Continue from `<artifact-dir>/run_state_checkpoint.json` instead of starting a new run.
 - `--auto-approve`: Skip the final manual approval prompt.
-- `--max-retries`: Maximum retries per coding, microarchitecture review, and verification stage.
-- `--max-architecture-retries`: Maximum architecture review retries.
-- `--max-supervisor-retries`: Maximum Supervisor review retries.
-- `--max-control-datapath-retries`: Maximum Control/Data Path plan review retries.
-- `--max-testbench-retries`: Maximum smoke testbench generation retries.
+- `--max-retries`: Maximum retries per coding, microarchitecture review, and verification stage. Defaults to `MAX_RETRIES` or `3`.
+- `--max-architecture-retries`: Maximum architecture review retries. Override with `MAX_ARCHITECTURE_RETRIES`.
+- `--max-supervisor-retries`: Maximum Supervisor review retries. Override with `MAX_SUPERVISOR_RETRIES`.
+- `--max-control-datapath-retries`: Maximum Control/Data Path plan review retries. Override with `MAX_CONTROL_DATAPATH_RETRIES`.
+- `--max-testbench-retries`: Maximum smoke testbench generation retries. Override with `MAX_TESTBENCH_RETRIES`.
 - `--no-testbench`: Skip smoke testbench generation and produce RTL only.
 - `--require-lint`: Fail the run if neither `verilator` nor `iverilog` is installed.
 - `--lint-timeout`: Syntax lint timeout in seconds.
@@ -158,6 +170,11 @@ Options:
 - `--llm-temperature`: Model temperature.
 - `--llm-api-url`: OpenAI-compatible chat completions URL.
 - `--llm-api-key`: API key for OpenAI or the remote endpoint. The saved config redacts it.
+
+LLM provider definitions, CLI argument registration, environment-variable
+resolution, URL normalization, API-key redaction, and backend construction are
+centralized in `verilog_agent/llm_config.py`. This keeps provider changes out of
+the pipeline orchestration in `main.py`.
 
 ## Agent prompts
 
@@ -190,12 +207,24 @@ Generated files are written under the artifact directory. By default this is
 `output_<project_keyword>_<YYYYMMDD>_<HHMMSS>`; use `--artifact-dir` to choose
 a fixed path such as `generated_rtl`.
 
+Continue a saved run from the command line:
+
+```bash
+python3 main.py --continue --artifact-dir output_my_project_20260713_120000 --auto-approve
+```
+
+Every pipeline node writes an atomic checkpoint before it starts and after it
+finishes. If a process stops during a node, continuation retries that node. If
+the node completed, continuation starts at its graph successor. Completed runs
+with no pending or failed stage are intentionally not restartable.
+
 Important artifacts:
 
 - `<artifact-dir>/user_requirement.txt`
 - `<artifact-dir>/llm_config.json`
 - `<artifact-dir>/execution_config.json`
 - `<artifact-dir>/dashboard_heartbeat.json`
+- `<artifact-dir>/run_state_checkpoint.json`
 - `<artifact-dir>/manager_plan.json`
 - `<artifact-dir>/architecture_contract.md`
 - `<artifact-dir>/logs/agent_messages/*_attempt_*.md`

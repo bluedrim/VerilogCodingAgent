@@ -824,7 +824,10 @@ def _reject_incomplete_review_repair(
         f"failed_attempts/{task_id}_incomplete_review_repair_attempt_{attempt}.txt",
         render_files(files) + "\n\n" + report,
     )
-    force_forward = bool(state.get("max_retries", 10) and attempt >= state.get("max_retries", 10))
+    force_forward = bool(
+        state.get("max_retries", DEFAULT_MAX_RETRIES)
+        and attempt >= state.get("max_retries", DEFAULT_MAX_RETRIES)
+    )
     if force_forward:
         print("---VERILOG CODING TEAM: LOCAL REVIEW FORCE-FORWARD THRESHOLD REACHED---")
     return {
@@ -860,7 +863,10 @@ def _reject_unchanged_candidate(
         f"failed_attempts/{task_id}_unchanged_after_review_attempt_{attempt}.txt",
         render_files(files) + "\n\n" + report,
     )
-    force_forward = bool(state.get("max_retries", 10) and attempt >= state.get("max_retries", 10))
+    force_forward = bool(
+        state.get("max_retries", DEFAULT_MAX_RETRIES)
+        and attempt >= state.get("max_retries", DEFAULT_MAX_RETRIES)
+    )
     if force_forward:
         print("---VERILOG CODING TEAM: LOCAL REVIEW FORCE-FORWARD THRESHOLD REACHED---")
     return {
@@ -1077,7 +1083,10 @@ def _reject_review_gate_failure(
         f"failed_attempts/{task_id}_review_gate_failed_attempt_{attempt}.txt",
         render_files(files) + "\n\n" + report,
     )
-    force_forward = bool(state.get("max_retries", 10) and attempt >= state.get("max_retries", 10))
+    force_forward = bool(
+        state.get("max_retries", DEFAULT_MAX_RETRIES)
+        and attempt >= state.get("max_retries", DEFAULT_MAX_RETRIES)
+    )
     if force_forward:
         print("---VERILOG CODING TEAM: LOCAL REVIEW FORCE-FORWARD THRESHOLD REACHED---")
     return {
@@ -1391,7 +1400,10 @@ def _reject_failed_preflight(
         f"failed_attempts/{task_id}_coding_preflight_failed_attempt_{attempt}.txt",
         render_files(files) + "\n\n" + report,
     )
-    force_forward = bool(state.get("max_retries", 10) and attempt >= state.get("max_retries", 10))
+    force_forward = bool(
+        state.get("max_retries", DEFAULT_MAX_RETRIES)
+        and attempt >= state.get("max_retries", DEFAULT_MAX_RETRIES)
+    )
     if force_forward:
         print("---VERILOG CODING TEAM: LOCAL REVIEW FORCE-FORWARD THRESHOLD REACHED---")
     return {
@@ -2032,7 +2044,7 @@ RTL candidate:
         render_files(state.get("candidate_files", [])) + "\n\n" + repair_packet,
     )
     next_retry_count = state.get("microarchitecture_retry_count", 0) + 1
-    force_forward_after = state.get("max_retries", 10)
+    force_forward_after = state.get("max_retries", DEFAULT_MAX_RETRIES)
     force_forward = bool(force_forward_after and next_retry_count >= force_forward_after)
     if force_forward:
         print("---MICROARCH REVIEWER: FORCE-FORWARD THRESHOLD REACHED---")

@@ -199,7 +199,7 @@ Architecture contract:
         }
 
     next_retry_count = state.get("architecture_retry_count", 0) + 1
-    force_forward_after = state.get("max_architecture_retries", 10)
+    force_forward_after = state.get("max_architecture_retries", DEFAULT_MAX_RETRIES)
     force_forward = bool(force_forward_after and next_retry_count >= force_forward_after)
     review_report = report or "Architecture contract is incomplete."
     if force_forward:

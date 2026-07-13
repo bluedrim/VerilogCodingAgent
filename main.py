@@ -12,18 +12,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Dict, List, Optional, TypedDict
 
+from verilog_agent.llm_config import add_llm_arguments
+
+
+DEFAULT_MAX_RETRIES = 3
+
 
 def positive_int(raw_value: str) -> int:
     value = int(raw_value)
     if value < 0:
         raise argparse.ArgumentTypeError("value must be 0 or greater")
-    return value
-
-
-def bounded_temperature(raw_value: str) -> float:
-    value = float(raw_value)
-    if value < 0 or value > 2:
-        raise argparse.ArgumentTypeError("temperature must be between 0 and 2")
     return value
 
 
@@ -33,46 +31,63 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--max-retries",
         type=positive_int,
-        default=10,
+        default=os.getenv("MAX_RETRIES", str(DEFAULT_MAX_RETRIES)),
         help=(
             "Force-forward threshold for coding local review gates, "
-            "microarchitecture review, and verification. Set 0 to disable force-forward."
+            "microarchitecture review, and verification. Defaults to MAX_RETRIES or 3; "
+            "set 0 to disable force-forward."
         ),
     )
     parser.add_argument(
         "--max-architecture-retries",
         type=positive_int,
-        default=10,
+        default=os.getenv(
+            "MAX_ARCHITECTURE_RETRIES",
+            os.getenv("MAX_RETRIES", str(DEFAULT_MAX_RETRIES)),
+        ),
         help=(
             "Architecture review force-forward threshold. At this count the run proceeds "
-            "to Supervisor with the best available architecture. Set 0 to disable force-forward."
+            "to Supervisor with the best available architecture. Defaults to "
+            "MAX_ARCHITECTURE_RETRIES or MAX_RETRIES; set 0 to disable force-forward."
         ),
     )
     parser.add_argument(
         "--max-supervisor-retries",
         type=positive_int,
-        default=10,
+        default=os.getenv(
+            "MAX_SUPERVISOR_RETRIES",
+            os.getenv("MAX_RETRIES", str(DEFAULT_MAX_RETRIES)),
+        ),
         help=(
             "Supervisor review force-forward threshold. At this count the run proceeds "
-            "to Control/Data Path instead of failing; set 0 to disable force-forward."
+            "to Control/Data Path instead of failing. Defaults to MAX_SUPERVISOR_RETRIES "
+            "or MAX_RETRIES; set 0 to disable force-forward."
         ),
     )
     parser.add_argument(
         "--max-control-datapath-retries",
         type=positive_int,
-        default=10,
+        default=os.getenv(
+            "MAX_CONTROL_DATAPATH_RETRIES",
+            os.getenv("MAX_RETRIES", str(DEFAULT_MAX_RETRIES)),
+        ),
         help=(
             "Control/Data Path review force-forward threshold. At this count the run proceeds "
-            "to Coding with the best available plan. Set 0 to disable force-forward."
+            "to Coding with the best available plan. Defaults to "
+            "MAX_CONTROL_DATAPATH_RETRIES or MAX_RETRIES; set 0 to disable force-forward."
         ),
     )
     parser.add_argument(
         "--max-testbench-retries",
         type=positive_int,
-        default=10,
+        default=os.getenv(
+            "MAX_TESTBENCH_RETRIES",
+            os.getenv("MAX_RETRIES", str(DEFAULT_MAX_RETRIES)),
+        ),
         help=(
             "Final lint force-forward threshold after testbench repair attempts. "
-            "At this count the run proceeds to final review. Set 0 to disable force-forward."
+            "At this count the run proceeds to final review. Defaults to "
+            "MAX_TESTBENCH_RETRIES or MAX_RETRIES; set 0 to disable force-forward."
         ),
     )
     parser.add_argument(
@@ -90,6 +105,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help=(
             "Directory for generated artifacts and logs. "
             "Defaults to output_<project_keyword>_<YYYYMMDD>_<HHMMSS>."
+        ),
+    )
+    parser.add_argument(
+        "--continue",
+        dest="continue_run",
+        action="store_true",
+        help=(
+            "Continue an interrupted or failed run from its latest checkpoint. "
+            "Requires --artifact-dir (or ARTIFACT_DIR) pointing to an existing output directory."
         ),
     )
     parser.add_argument(
@@ -148,23 +172,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=32,
         help="Maximum number of Manager tasks accepted from the planning step.",
     )
-    parser.add_argument(
-        "--llm-provider",
-        choices=["ollama", "gpt-oss", "openai"],
-        help="LLM provider/backend. 'openai' uses OPENAI_API_KEY.",
-    )
-    parser.add_argument("--llm-model", help="LLM model name, for example gpt-oss:20b or gpt-4.1.")
-    parser.add_argument("--llm-temperature", type=bounded_temperature, help="LLM temperature.")
-    parser.add_argument(
-        "--llm-timeout",
-        type=positive_int,
-        help="LLM request timeout in seconds. Set 0 to disable request timeout.",
-    )
-    parser.add_argument(
-        "--llm-api-url",
-        help="OpenAI-compatible chat completions URL, for example http://abc.net:30001/chat/completions.",
-    )
-    parser.add_argument("--llm-api-key", help="API key for OpenAI or an OpenAI-compatible endpoint.")
+    add_llm_arguments(parser)
     parser.add_argument(
         "--fail-on-manager-fallback",
         action="store_true",
@@ -187,12 +195,25 @@ try:
     )
 
     from dotenv import load_dotenv
-    from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
+    from langchain_core.messages import (
+        AIMessage,
+        BaseMessage,
+        HumanMessage,
+        ToolMessage,
+        message_to_dict,
+        messages_from_dict,
+    )
     from langchain_core.prompts import ChatPromptTemplate
-    from langchain_ollama.chat_models import ChatOllama
     from langgraph.graph import END, StateGraph
 
     from tools import write_verilog_file
+    from verilog_agent.llm_config import (
+        create_llm,
+        llm_config,
+        normalize_chat_completions_url,
+        public_llm_config,
+        resolve_llm_settings,
+    )
 except ModuleNotFoundError as exc:
     print(f"Missing dependency: {exc.name}")
     print("Install project dependencies with: python3 -m pip install -r requirements.txt")
@@ -271,159 +292,13 @@ class AgentState(TypedDict):
     generation_ok: bool
     coding_review_forced_forward: bool
     error_message: str
+    resume_stage: str
 
 
-# --- 3. Setup LLM and Tools ---
-def normalize_chat_completions_url(url: str | None) -> str:
-    if not url:
-        return ""
-    normalized = url.rstrip("/")
-    suffix = "/chat/completions"
-    if normalized.endswith(suffix):
-        normalized = normalized[: -len(suffix)]
-    return normalized
-
-
-def resolve_llm_settings(
-    provider: str | None = None,
-    model: str | None = None,
-    temperature: float | None = None,
-    api_url: str | None = None,
-    api_key: str | None = None,
-    timeout_seconds: int | None = None,
-) -> Dict[str, object]:
-    resolved_provider = (provider or os.getenv("LLM_PROVIDER") or "ollama").strip().lower()
-    if resolved_provider not in {"ollama", "gpt-oss", "openai"}:
-        raise ValueError("Unsupported LLM provider. Use ollama, gpt-oss, or openai.")
-    resolved_temperature = (
-        temperature if temperature is not None else float(os.getenv("LLM_TEMPERATURE", "0.1"))
-    )
-    if resolved_provider == "openai":
-        resolved_api_url = api_url or os.getenv("OPENAI_API_URL") or os.getenv("LLM_API_URL") or ""
-        resolved_api_key = api_key or os.getenv("OPENAI_API_KEY") or os.getenv("LLM_API_KEY") or ""
-    elif resolved_provider == "gpt-oss":
-        resolved_api_url = api_url or os.getenv("GPT_OSS_API_URL") or os.getenv("LLM_API_URL") or ""
-        resolved_api_key = api_key or os.getenv("GPT_OSS_API_KEY") or os.getenv("LLM_API_KEY") or ""
-    else:
-        resolved_api_url = api_url or os.getenv("LLM_API_URL") or ""
-        resolved_api_key = api_key or os.getenv("LLM_API_KEY") or ""
-    resolved_timeout_seconds = (
-        timeout_seconds
-        if timeout_seconds is not None
-        else int(os.getenv("LLM_TIMEOUT_SECONDS", "180"))
-    )
-
-    if resolved_provider == "gpt-oss":
-        resolved_model = model or os.getenv("GPT_OSS_MODEL") or os.getenv("LLM_MODEL") or "gpt-oss"
-        backend = "openai-compatible" if resolved_api_url else "ollama"
-    elif resolved_provider == "openai":
-        resolved_model = model or os.getenv("OPENAI_MODEL") or os.getenv("LLM_MODEL") or "gpt-4.1"
-        backend = "openai"
-    else:
-        resolved_model = model or os.getenv("LLM_MODEL") or os.getenv("OLLAMA_MODEL") or "gpt-oss:20b"
-        backend = resolved_provider
-
-    if backend == "openai-compatible":
-        base_url = normalize_chat_completions_url(resolved_api_url)
-    elif backend == "openai":
-        base_url = normalize_chat_completions_url(resolved_api_url)
-    elif backend == "ollama":
-        base_url = os.getenv("OLLAMA_BASE_URL", "")
-    else:
-        base_url = resolved_api_url
-
-    return {
-        "provider": resolved_provider,
-        "backend": backend,
-        "model": resolved_model,
-        "temperature": resolved_temperature,
-        "api_url": resolved_api_url,
-        "base_url": base_url,
-        "api_key": resolved_api_key,
-        "timeout_seconds": resolved_timeout_seconds,
-    }
-
-
-def public_llm_config(settings: Dict[str, object]) -> Dict[str, object]:
-    api_key = str(settings.get("api_key") or "")
-    redacted_key = ""
-    if api_key:
-        redacted_key = f"{api_key[:4]}...{api_key[-4:]}" if len(api_key) > 8 else "***"
-    return {
-        "provider": settings.get("provider", ""),
-        "backend": settings.get("backend", ""),
-        "model": settings.get("model", ""),
-        "temperature": settings.get("temperature", ""),
-        "api_url": settings.get("api_url", ""),
-        "base_url": settings.get("base_url", ""),
-        "api_key_set": bool(api_key),
-        "api_key_redacted": redacted_key,
-        "timeout_seconds": settings.get("timeout_seconds", ""),
-    }
-
-
+# --- 3. Setup Runtime and Tools ---
 def discover_lint_tool() -> str:
     lint_tool = shutil.which("verilator") or shutil.which("iverilog")
     return lint_tool or ""
-
-
-def create_llm(
-    provider: str | None = None,
-    model: str | None = None,
-    temperature: float | None = None,
-    api_url: str | None = None,
-    api_key: str | None = None,
-    timeout_seconds: int | None = None,
-):
-    settings = resolve_llm_settings(provider, model, temperature, api_url, api_key, timeout_seconds)
-    backend = str(settings["backend"])
-    model_name = str(settings["model"])
-    resolved_temperature = float(settings["temperature"])
-    resolved_timeout = int(settings.get("timeout_seconds") or 0)
-
-    if backend in {"openai", "openai-compatible"}:
-        try:
-            from langchain_openai import ChatOpenAI
-        except ModuleNotFoundError as exc:
-            print(f"Missing dependency: {exc.name}")
-            print("Install project dependencies with: python3 -m pip install -r requirements.txt")
-            sys.exit(1)
-        if backend == "openai" and not settings["api_key"]:
-            raise ValueError("OpenAI provider requires OPENAI_API_KEY or --llm-api-key.")
-        kwargs = {
-            "model": model_name,
-            "temperature": resolved_temperature,
-            "api_key": str(settings["api_key"] or "dummy"),
-        }
-        if resolved_timeout > 0:
-            kwargs["timeout"] = resolved_timeout
-        if settings["base_url"]:
-            kwargs["base_url"] = str(settings["base_url"])
-        return ChatOpenAI(**kwargs)
-
-    if backend != "ollama":
-        raise ValueError("Unsupported LLM backend. Supported backends: ollama, openai, openai-compatible")
-
-    kwargs = {"model": model_name, "temperature": resolved_temperature}
-    if resolved_timeout > 0:
-        kwargs["client_kwargs"] = {"timeout": resolved_timeout}
-        kwargs["sync_client_kwargs"] = {"timeout": resolved_timeout}
-    if settings["base_url"]:
-        kwargs["base_url"] = str(settings["base_url"])
-    return ChatOllama(**kwargs)
-
-
-def llm_config(
-    provider: str | None = None,
-    model: str | None = None,
-    temperature: float | None = None,
-    api_url: str | None = None,
-    api_key: str | None = None,
-    timeout_seconds: int | None = None,
-):
-    return public_llm_config(
-        resolve_llm_settings(provider, model, temperature, api_url, api_key, timeout_seconds)
-    )
 
 
 llm = None
@@ -1542,6 +1417,7 @@ def _write_dashboard_heartbeat(relative_path: str, written_path: Path):
         payload = {
             "updated_at": datetime.now(timezone.utc).isoformat(),
             "artifact_dir": str(ARTIFACT_DIR),
+            "process_id": os.getpid(),
             "last_artifact": str(relative_path),
             "last_artifact_path": str(written_path),
             "last_artifact_bytes": written_path.stat().st_size,
@@ -1555,6 +1431,103 @@ def _write_dashboard_heartbeat(relative_path: str, written_path: Path):
 
 def write_json_artifact(relative_path: str, content: object):
     write_text_artifact(relative_path, json.dumps(content, indent=2))
+
+
+CHECKPOINT_FILENAME = "run_state_checkpoint.json"
+CHECKPOINT_VERSION = 1
+
+
+def _checkpoint_state_to_json(state: Dict[str, object]) -> Dict[str, object]:
+    serialized = dict(state)
+    serialized_messages = []
+    for message in state.get("messages", []):
+        try:
+            serialized_messages.append(message_to_dict(message))
+        except (TypeError, ValueError):
+            serialized_messages.append(
+                {
+                    "type": "ai",
+                    "data": {"content": str(getattr(message, "content", message))},
+                }
+            )
+    serialized["messages"] = serialized_messages
+    return serialized
+
+
+def _checkpoint_state_from_json(raw_state: object) -> Dict[str, object]:
+    if not isinstance(raw_state, dict):
+        raise ValueError("Checkpoint state must be a JSON object.")
+    restored = dict(raw_state)
+    raw_messages = restored.get("messages", [])
+    if not isinstance(raw_messages, list):
+        raise ValueError("Checkpoint messages must be a JSON array.")
+    try:
+        restored["messages"] = messages_from_dict(raw_messages)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f"Checkpoint messages are invalid: {exc}") from exc
+    return restored
+
+
+def _merge_state_update(
+    state: Dict[str, object], update: Dict[str, object] | None
+) -> Dict[str, object]:
+    merged = dict(state)
+    if not update:
+        return merged
+    for key, value in update.items():
+        if key == "messages":
+            merged[key] = list(state.get(key, [])) + list(value or [])
+        else:
+            merged[key] = value
+    return merged
+
+
+def write_run_checkpoint(
+    state: Dict[str, object],
+    resume_stage: str,
+    *,
+    phase: str,
+    last_completed_node: str = "",
+    error: str = "",
+) -> None:
+    checkpoint_path = artifact_path(CHECKPOINT_FILENAME)
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    checkpoint_state = dict(state)
+    checkpoint_state["resume_stage"] = resume_stage
+    payload = {
+        "version": CHECKPOINT_VERSION,
+        "saved_at": datetime.now(timezone.utc).isoformat(),
+        "phase": phase,
+        "resume_stage": resume_stage,
+        "last_completed_node": last_completed_node,
+        "error": error,
+        "state": _checkpoint_state_to_json(checkpoint_state),
+    }
+    temporary_path = checkpoint_path.with_suffix(checkpoint_path.suffix + ".tmp")
+    temporary_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    os.replace(temporary_path, checkpoint_path)
+    _write_dashboard_heartbeat(CHECKPOINT_FILENAME, checkpoint_path)
+
+
+def read_run_checkpoint(artifact_dir: Path) -> tuple[Dict[str, object], Dict[str, object]]:
+    checkpoint_path = artifact_dir / CHECKPOINT_FILENAME
+    try:
+        payload = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise ValueError(
+            f"No {CHECKPOINT_FILENAME} exists in {artifact_dir}. "
+            "Only runs created after checkpoint support was added can be continued."
+        ) from exc
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Could not read continuation checkpoint: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("Continuation checkpoint must be a JSON object.")
+    if payload.get("version") != CHECKPOINT_VERSION:
+        raise ValueError(
+            f"Unsupported checkpoint version: {payload.get('version')!r}; "
+            f"expected {CHECKPOINT_VERSION}."
+        )
+    return _checkpoint_state_from_json(payload.get("state")), payload
 
 
 DEFAULT_CODE_PROMPT_KEYS = {
@@ -1984,7 +1957,7 @@ def architecture_generation_condition(state: AgentState):
 def supervisor_review_condition(state: AgentState):
     if state.get("supervisor_review_passed"):
         return "control_datapath"
-    force_forward_after = state.get("max_supervisor_retries", 10)
+    force_forward_after = state.get("max_supervisor_retries", DEFAULT_MAX_RETRIES)
     if force_forward_after and state.get("supervisor_retry_count", 0) >= force_forward_after:
         print("---CONDITION: Supervisor review force-forward threshold reached. Continuing to Control/Data Path planning with best available packet.---")
         return "control_datapath"
@@ -2058,29 +2031,229 @@ def final_review_condition(state: AgentState):
     return "summary"
 
 
+CHECKPOINT_STAGES = {
+    "intake",
+    "manager",
+    "architecture",
+    "architecture_review",
+    "supervisor",
+    "supervisor_review",
+    "control_datapath_planner",
+    "control_datapath_review",
+    "verilog_coding_team",
+    "microarchitecture_reviewer",
+    "verification_team",
+    "supervisor_accept",
+    "testbench_team",
+    "final_lint",
+    "final_review",
+    "writer",
+    "summary",
+}
+
+
+def _failed_stage_resume_target(state: AgentState) -> str:
+    failed_stage = str(state.get("failed_stage") or "").lower()
+    if failed_stage == "manager":
+        return "manager"
+    if failed_stage.startswith("architecture"):
+        return "architecture"
+    if failed_stage.startswith("supervisor"):
+        return "supervisor"
+    if failed_stage.startswith("control_datapath"):
+        return "control_datapath_planner"
+    if failed_stage.startswith(("coding", "microarchitecture", "verification")):
+        return "verilog_coding_team"
+    if failed_stage.startswith(("testbench", "final_lint")):
+        return "testbench_team"
+    if failed_stage == "final_review":
+        return "final_review"
+    if failed_stage == "writer":
+        return "writer"
+    return ""
+
+
+def _resume_target_after_summary(state: AgentState) -> str:
+    if (
+        state.get("run_status") == "passed"
+        and state.get("human_approved")
+        and not state.get("writer_errors")
+    ):
+        return ""
+    failed_target = _failed_stage_resume_target(state)
+    if failed_target:
+        return failed_target
+    manager_plan = state.get("manager_plan", [])
+    current_task_index = state.get("current_task_index", 0)
+    if isinstance(manager_plan, list) and isinstance(current_task_index, int):
+        if current_task_index < len(manager_plan):
+            return "supervisor"
+    if state.get("writer_errors"):
+        return "writer"
+    if state.get("final_files") and not state.get("human_approved"):
+        return "final_review"
+    return ""
+
+
+def checkpoint_resume_target(completed_node: str, state: AgentState) -> str:
+    if completed_node == "intake":
+        return "manager"
+    if completed_node == "manager":
+        return "summary" if state.get("failed_stage") == "manager" else "architecture"
+    if completed_node == "architecture":
+        if state.get("failed_stage") != "architecture_generation":
+            return "architecture_review"
+        return "architecture"
+    if completed_node == "architecture_review":
+        if state.get("architecture_review_passed") or state.get(
+            "architecture_review_forced_forward"
+        ):
+            return "supervisor"
+        return "architecture"
+    if completed_node == "supervisor":
+        if state.get("failed_stage") != "supervisor_generation":
+            return "supervisor_review"
+        return "supervisor"
+    if completed_node == "supervisor_review":
+        if state.get("supervisor_review_passed"):
+            return "control_datapath_planner"
+        retry_limit = state.get("max_supervisor_retries", DEFAULT_MAX_RETRIES)
+        if retry_limit and state.get("supervisor_retry_count", 0) >= retry_limit:
+            return "control_datapath_planner"
+        return "supervisor"
+    if completed_node == "control_datapath_planner":
+        if state.get("failed_stage") != "control_datapath_generation":
+            return "control_datapath_review"
+        return "control_datapath_planner"
+    if completed_node == "control_datapath_review":
+        if state.get("control_datapath_review_passed") or state.get(
+            "control_datapath_review_forced_forward"
+        ):
+            return "verilog_coding_team"
+        return "control_datapath_planner"
+    if completed_node == "verilog_coding_team":
+        if state.get("generation_ok") or state.get("coding_review_forced_forward"):
+            return "microarchitecture_reviewer"
+        return "verilog_coding_team"
+    if completed_node == "microarchitecture_reviewer":
+        if state.get("microarchitecture_passed") or state.get(
+            "microarchitecture_review_forced_forward"
+        ):
+            return "verification_team"
+        return "verilog_coding_team"
+    if completed_node == "verification_team":
+        if state.get("verification_passed") or state.get(
+            "verification_review_forced_forward"
+        ):
+            return "supervisor_accept"
+        return "verilog_coding_team"
+    if completed_node == "supervisor_accept":
+        if state.get("current_task_index", 0) < len(state.get("manager_plan", [])):
+            return "supervisor"
+        return "final_lint" if state.get("skip_testbench") else "testbench_team"
+    if completed_node == "testbench_team":
+        return "final_lint" if state.get("generation_ok") else "testbench_team"
+    if completed_node == "final_lint":
+        if state.get("final_lint_passed") or state.get("final_lint_forced_forward"):
+            return "final_review"
+        return "summary" if state.get("skip_testbench") else "testbench_team"
+    if completed_node == "final_review":
+        return "writer" if state.get("human_approved") else "summary"
+    if completed_node == "writer":
+        return "summary"
+    if completed_node == "summary":
+        return _resume_target_after_summary(state)
+    raise ValueError(f"Unknown checkpoint node: {completed_node}")
+
+
+def checkpointed_agent(node_name: str, agent):
+    def wrapped(state: AgentState):
+        write_run_checkpoint(state, node_name, phase="before", last_completed_node="")
+        try:
+            update = agent(state) or {}
+        except BaseException as exc:
+            write_run_checkpoint(
+                state,
+                node_name,
+                phase="interrupted",
+                error=f"{type(exc).__name__}: {exc}"[:4000],
+            )
+            raise
+        merged_state = _merge_state_update(state, update)
+        next_stage = checkpoint_resume_target(node_name, merged_state)
+        write_run_checkpoint(
+            merged_state,
+            next_stage,
+            phase="after",
+            last_completed_node=node_name,
+        )
+        return update
+
+    wrapped.__name__ = f"checkpointed_{node_name}"
+    return wrapped
+
+
+def resume_dispatch_agent(state: AgentState):
+    return {}
+
+
+def resume_dispatch_condition(state: AgentState) -> str:
+    stage = str(state.get("resume_stage") or "intake")
+    if stage not in CHECKPOINT_STAGES:
+        raise ValueError(f"Checkpoint has unsupported resume stage: {stage!r}")
+    return stage
+
+
 
 # --- 6. Build the LangGraph Workflow ---
 workflow = StateGraph(AgentState)
 
-workflow.add_node("intake", intake_agent)
-workflow.add_node("manager", manager_agent)
-workflow.add_node("architecture", architecture_agent)
-workflow.add_node("architecture_review", architecture_review_agent)
-workflow.add_node("supervisor", supervisor_agent)
-workflow.add_node("supervisor_review", supervisor_review_agent)
-workflow.add_node("control_datapath_planner", control_datapath_planner_agent)
-workflow.add_node("control_datapath_review", control_datapath_review_agent)
-workflow.add_node("verilog_coding_team", verilog_coding_team_agent)
-workflow.add_node("microarchitecture_reviewer", microarchitecture_reviewer_agent)
-workflow.add_node("verification_team", verification_team_agent)
-workflow.add_node("supervisor_accept", supervisor_accept_agent)
-workflow.add_node("testbench_team", testbench_team_agent)
-workflow.add_node("final_lint", final_lint_agent)
-workflow.add_node("final_review", final_review_agent)
-workflow.add_node("summary", summary_agent)
-workflow.add_node("writer", writer_agent)
+workflow.add_node("resume_dispatch", resume_dispatch_agent)
+workflow.add_node("intake", checkpointed_agent("intake", intake_agent))
+workflow.add_node("manager", checkpointed_agent("manager", manager_agent))
+workflow.add_node("architecture", checkpointed_agent("architecture", architecture_agent))
+workflow.add_node(
+    "architecture_review",
+    checkpointed_agent("architecture_review", architecture_review_agent),
+)
+workflow.add_node("supervisor", checkpointed_agent("supervisor", supervisor_agent))
+workflow.add_node(
+    "supervisor_review", checkpointed_agent("supervisor_review", supervisor_review_agent)
+)
+workflow.add_node(
+    "control_datapath_planner",
+    checkpointed_agent("control_datapath_planner", control_datapath_planner_agent),
+)
+workflow.add_node(
+    "control_datapath_review",
+    checkpointed_agent("control_datapath_review", control_datapath_review_agent),
+)
+workflow.add_node(
+    "verilog_coding_team",
+    checkpointed_agent("verilog_coding_team", verilog_coding_team_agent),
+)
+workflow.add_node(
+    "microarchitecture_reviewer",
+    checkpointed_agent("microarchitecture_reviewer", microarchitecture_reviewer_agent),
+)
+workflow.add_node(
+    "verification_team", checkpointed_agent("verification_team", verification_team_agent)
+)
+workflow.add_node(
+    "supervisor_accept", checkpointed_agent("supervisor_accept", supervisor_accept_agent)
+)
+workflow.add_node("testbench_team", checkpointed_agent("testbench_team", testbench_team_agent))
+workflow.add_node("final_lint", checkpointed_agent("final_lint", final_lint_agent))
+workflow.add_node("final_review", checkpointed_agent("final_review", final_review_agent))
+workflow.add_node("summary", checkpointed_agent("summary", summary_agent))
+workflow.add_node("writer", checkpointed_agent("writer", writer_agent))
 
-workflow.set_entry_point("intake")
+workflow.set_entry_point("resume_dispatch")
+workflow.add_conditional_edges(
+    "resume_dispatch",
+    resume_dispatch_condition,
+    {stage: stage for stage in CHECKPOINT_STAGES},
+)
 
 workflow.add_edge("intake", "manager")
 workflow.add_conditional_edges(
@@ -2166,17 +2339,35 @@ app = workflow.compile()
 # --- 7. Run the Application ---
 if __name__ == "__main__":
     args = parse_args()
-    user_request_input = args.spec or ""
-    if not user_request_input.strip():
-        user_request_input = input(
-            "Describe the RTL you want to build, or enter a spec file path / @path (or 'exit'): "
-        ).strip()
-    if user_request_input.lower() == "exit":
-        sys.exit("Exiting.")
-    initial_user_request = read_user_requirement(user_request_input)
-
     run_timestamp = datetime.now()
-    ARTIFACT_DIR = resolve_artifact_dir(args, initial_user_request, run_timestamp)
+    resumed_state = None
+    resume_checkpoint = None
+    if args.continue_run:
+        configured_dir = args.artifact_dir or os.getenv("ARTIFACT_DIR")
+        if not configured_dir:
+            raise SystemExit("--continue requires --artifact-dir or ARTIFACT_DIR.")
+        ARTIFACT_DIR = Path(configured_dir).expanduser()
+        if not ARTIFACT_DIR.is_dir():
+            raise SystemExit(f"Continuation artifact directory does not exist: {ARTIFACT_DIR}")
+        resumed_state, resume_checkpoint = read_run_checkpoint(ARTIFACT_DIR)
+        initial_user_request = str(resumed_state.get("user_request") or "").strip()
+        if not initial_user_request:
+            raise SystemExit("Continuation checkpoint does not contain the original requirement.")
+        resume_stage = str(resume_checkpoint.get("resume_stage") or "")
+        if not resume_stage:
+            raise SystemExit("This run is complete and has no pending stage to continue.")
+        if resume_stage not in CHECKPOINT_STAGES:
+            raise SystemExit(f"Checkpoint has unsupported resume stage: {resume_stage!r}")
+    else:
+        user_request_input = args.spec or ""
+        if not user_request_input.strip():
+            user_request_input = input(
+                "Describe the RTL you want to build, or enter a spec file path / @path (or 'exit'): "
+            ).strip()
+        if user_request_input.lower() == "exit":
+            sys.exit("Exiting.")
+        initial_user_request = read_user_requirement(user_request_input)
+        ARTIFACT_DIR = resolve_artifact_dir(args, initial_user_request, run_timestamp)
     os.environ["ARTIFACT_DIR"] = str(ARTIFACT_DIR)
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     llm = create_llm(
@@ -2198,6 +2389,24 @@ if __name__ == "__main__":
     if args.auto_approve:
         os.environ["AUTO_APPROVE_FINAL"] = "true"
 
+    previous_execution_config = {}
+    if args.continue_run:
+        try:
+            previous_execution_config = json.loads(
+                (ARTIFACT_DIR / "execution_config.json").read_text(encoding="utf-8")
+            )
+        except (OSError, json.JSONDecodeError):
+            previous_execution_config = {}
+    continuation_history = list(previous_execution_config.get("continuation_history", []))
+    if args.continue_run:
+        continuation_history.append(
+            {
+                "run_id": run_id,
+                "continued_at": datetime.now(timezone.utc).isoformat(),
+                "resume_stage": str(resume_checkpoint.get("resume_stage") or ""),
+                "checkpoint_saved_at": str(resume_checkpoint.get("saved_at") or ""),
+            }
+        )
     execution_config = {
         "run_id": run_id,
         "argv": sys.argv[1:],
@@ -2205,6 +2414,14 @@ if __name__ == "__main__":
         "artifact_dir_auto_named": not bool(args.artifact_dir or os.getenv("ARTIFACT_DIR")),
         "artifact_dir_timestamp": run_timestamp.strftime("%Y-%m-%d %H:%M:%S"),
         "project_keyword": derive_project_keyword(initial_user_request),
+        "continued": args.continue_run,
+        "resume_stage": str(resume_checkpoint.get("resume_stage") or "")
+        if resume_checkpoint
+        else "intake",
+        "original_run_id": previous_execution_config.get("original_run_id")
+        or previous_execution_config.get("run_id")
+        or run_id,
+        "continuation_history": continuation_history,
         "auto_approve": args.auto_approve,
         "skip_testbench": args.no_testbench,
         "require_lint": args.require_lint,
@@ -2318,7 +2535,40 @@ if __name__ == "__main__":
         "generation_ok": False,
         "coding_review_forced_forward": False,
         "error_message": "",
+        "resume_stage": "intake",
     }
+    if resumed_state is not None:
+        initial_state.update(resumed_state)
+        initial_state.update(
+            {
+                "run_id": run_id,
+                "user_request": initial_user_request,
+                "resume_stage": str(resume_checkpoint.get("resume_stage") or ""),
+                "run_status": "running",
+                "max_architecture_retries": args.max_architecture_retries,
+                "max_supervisor_retries": args.max_supervisor_retries,
+                "max_control_datapath_retries": args.max_control_datapath_retries,
+                "max_testbench_retries": args.max_testbench_retries,
+                "max_retries": args.max_retries,
+                "require_lint": args.require_lint,
+                "lint_timeout_seconds": args.lint_timeout,
+                "allow_blackboxes": args.allow_blackboxes,
+                "llm_timeout_seconds": args.llm_timeout
+                if args.llm_timeout is not None
+                else int(os.getenv("LLM_TIMEOUT_SECONDS", "180")),
+                "skip_testbench": args.no_testbench,
+                "max_generated_file_bytes": args.max_generated_file_bytes,
+                "max_generated_files": args.max_generated_files,
+                "max_context_chars": args.max_context_chars,
+                "max_user_request_chars": args.max_user_request_chars,
+                "max_manager_tasks": args.max_manager_tasks,
+                "fail_on_manager_fallback": args.fail_on_manager_fallback,
+            }
+        )
+        print(
+            f"Continuing {ARTIFACT_DIR} from stage "
+            f"{initial_state['resume_stage']} (checkpoint {resume_checkpoint.get('saved_at', 'unknown')})."
+        )
     try:
         result = app.invoke(initial_state, config={"recursion_limit": args.graph_recursion_limit})
         print("\nProcess finished.")

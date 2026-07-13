@@ -15,7 +15,12 @@ def _with_runtime(fn):
 @_with_runtime
 def final_review_agent(state: AgentState):
     if os.getenv("AUTO_APPROVE_FINAL", "").strip().lower() in {"1", "true", "yes"}:
-        return {"human_approved": True, "run_status": "passed"}
+        return {
+            "human_approved": True,
+            "run_status": "passed",
+            "failed_stage": "",
+            "blocking_report": "",
+        }
 
     all_files = state.get("final_files", []) + state.get("testbench_files", [])
     print("\n" + "-" * 20 + " FINAL REVIEW " + "-" * 20)
@@ -26,7 +31,12 @@ def final_review_agent(state: AgentState):
     feedback = input("Write files? (approve / reject): ").strip().lower()
     if feedback == "approve":
         write_text_artifact("logs/final_human_approval.txt", "approve")
-        return {"human_approved": True, "run_status": "passed"}
+        return {
+            "human_approved": True,
+            "run_status": "passed",
+            "failed_stage": "",
+            "blocking_report": "",
+        }
 
     write_text_artifact("logs/final_human_approval.txt", feedback or "reject")
     return {
@@ -271,4 +281,12 @@ def writer_agent(state: AgentState):
         print(f"- {result_text}")
         if result_text.lower().startswith("error"):
             errors.append(result_text)
-    return {"writer_results": results, "writer_errors": errors}
+    recovered_writer_failure = not errors and state.get("failed_stage") == "writer"
+    return {
+        "writer_results": results,
+        "writer_errors": errors,
+        "failed_stage": "" if recovered_writer_failure else state.get("failed_stage", ""),
+        "blocking_report": ""
+        if recovered_writer_failure
+        else state.get("blocking_report", ""),
+    }

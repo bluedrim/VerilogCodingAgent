@@ -360,7 +360,7 @@ Supervisor task packet:
     print("---SUPERVISOR REVIEW: FAIL---")
     review_report = report or "Supervisor task packet is incomplete."
     next_retry_count = state.get("supervisor_retry_count", 0) + 1
-    force_forward_after = state.get("max_supervisor_retries", 10)
+    force_forward_after = state.get("max_supervisor_retries", DEFAULT_MAX_RETRIES)
     force_forward = bool(force_forward_after and next_retry_count >= force_forward_after)
     if force_forward:
         review_report = (

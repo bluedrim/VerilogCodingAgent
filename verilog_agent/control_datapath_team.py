@@ -229,7 +229,7 @@ Control/Data Path plan:
         }
 
     next_retry_count = state.get("control_datapath_retry_count", 0) + 1
-    force_forward_after = state.get("max_control_datapath_retries", 10)
+    force_forward_after = state.get("max_control_datapath_retries", DEFAULT_MAX_RETRIES)
     force_forward = bool(force_forward_after and next_retry_count >= force_forward_after)
     review_report = report or "Control/Data Path plan is incomplete."
     if force_forward:

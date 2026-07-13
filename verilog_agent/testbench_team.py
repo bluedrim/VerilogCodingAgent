@@ -211,7 +211,7 @@ def final_lint_agent(state: AgentState):
             "blocking_report": "",
         }
     next_retry_count = state.get("testbench_retry_count", 0) + 1
-    force_forward_after = state.get("max_testbench_retries", 10)
+    force_forward_after = state.get("max_testbench_retries", DEFAULT_MAX_RETRIES)
     force_forward = bool(force_forward_after and next_retry_count >= force_forward_after)
     report = lint_result["report"]
     if force_forward:

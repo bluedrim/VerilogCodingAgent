@@ -67,6 +67,8 @@ def manager_agent(state: AgentState):
             "current_task_index": 0,
             "messages": [response],
             "manager_fallback_used": False,
+            "failed_stage": "",
+            "blocking_report": "",
             "error_message": "",
         }
     except (json.JSONDecodeError, ValueError) as exc:
@@ -119,6 +121,8 @@ Parser error:
                 "current_task_index": 0,
                 "messages": [response, repair_response],
                 "manager_fallback_used": False,
+                "failed_stage": "",
+                "blocking_report": "",
                 "error_message": f"Manager plan repaired after invalid JSON: {exc}",
             }
         except (json.JSONDecodeError, ValueError) as repair_exc:
@@ -162,5 +166,7 @@ Parser error:
             "current_task_index": 0,
             "messages": [response],
             "manager_fallback_used": True,
+            "failed_stage": "",
+            "blocking_report": "",
             "error_message": f"Manager plan fallback used: {exc}",
         }
