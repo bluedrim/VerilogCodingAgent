@@ -76,6 +76,11 @@ class CheckpointPersistenceTests(unittest.TestCase):
 
 
 class DashboardContinuationTests(unittest.TestCase):
+    def test_dashboard_html_is_loaded_from_external_file(self):
+        self.assertEqual(dashboard.DASHBOARD_HTML_PATH.name, "dashboard.html")
+        self.assertNotIn("<!doctype html>", Path(dashboard.__file__).read_text(encoding="utf-8"))
+        self.assertIn("Verilog Agent Dashboard", dashboard.load_dashboard_html())
+
     def test_pid_probe_falls_back_when_wnohang_is_unavailable(self):
         with (
             patch.object(dashboard.os, "WNOHANG", None),
@@ -86,6 +91,41 @@ class DashboardContinuationTests(unittest.TestCase):
 
         waitpid.assert_not_called()
         kill.assert_called_once_with(12345, 0)
+
+    def test_dashboard_start_launches_agent_as_detached_process(self):
+        with tempfile.TemporaryDirectory(prefix="verilog_dashboard_start_") as tmp_dir:
+            root = Path(tmp_dir)
+            (root / "main.py").write_text("print('stub')\n", encoding="utf-8")
+            captured = {}
+
+            class FakeProcess:
+                pid = 515151
+
+            def fake_popen(command, **kwargs):
+                captured["command"] = command
+                captured["kwargs"] = kwargs
+                return FakeProcess()
+
+            with patch.object(dashboard.subprocess, "Popen", side_effect=fake_popen):
+                result = dashboard.start_agent_run(
+                    root,
+                    {
+                        "specText": "Create a counter module",
+                        "filename": "counter.md",
+                        "llmProvider": "gpt-oss",
+                    },
+                )
+
+            run_dir = root / result["artifact_dir"]
+            job = json.loads((run_dir / "dashboard_job.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(result["pid"], 515151)
+        self.assertIn("--spec", captured["command"])
+        self.assertIn("--llm-provider", captured["command"])
+        self.assertTrue(captured["kwargs"]["start_new_session"])
+        self.assertTrue(captured["kwargs"]["close_fds"])
+        self.assertEqual(captured["kwargs"]["stdin"], dashboard.subprocess.DEVNULL)
+        self.assertEqual(job["options"]["llm_provider"], "gpt-oss")
 
     def test_dashboard_builds_continue_command_for_selected_run(self):
         with tempfile.TemporaryDirectory(prefix="verilog_dashboard_") as tmp_dir:
@@ -126,6 +166,8 @@ class DashboardContinuationTests(unittest.TestCase):
         self.assertTrue(before["can_continue"])
         self.assertEqual(before["resume_stage"], "verilog_coding_team")
         self.assertIn("--continue", captured["command"])
+        self.assertTrue(captured["kwargs"]["start_new_session"])
+        self.assertTrue(captured["kwargs"]["close_fds"])
         self.assertEqual(result["resume_stage"], "verilog_coding_team")
         self.assertEqual(job["options"]["llm_provider"], "gpt-oss")
         self.assertEqual(job["continuation_count"], 1)
