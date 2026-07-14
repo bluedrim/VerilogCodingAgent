@@ -25,6 +25,7 @@ ROOT = Path(__file__).resolve().parent
 MAX_FILE_PREVIEW_BYTES = 1_000_000
 MAX_START_PAYLOAD_BYTES = 1_000_000
 MAX_SPEC_CHARS = 500_000
+CLIENT_DISCONNECT_ERRNOS = {53, 54, 10053, 10054}
 
 
 DASHBOARD_HTML_PATH = ROOT / "dashboard.html"
@@ -32,6 +33,14 @@ DASHBOARD_HTML_PATH = ROOT / "dashboard.html"
 
 def load_dashboard_html() -> str:
     return DASHBOARD_HTML_PATH.read_text(encoding="utf-8")
+
+
+def is_client_disconnect(exc: BaseException) -> bool:
+    if isinstance(exc, (BrokenPipeError, ConnectionAbortedError, ConnectionResetError)):
+        return True
+    if isinstance(exc, OSError):
+        return getattr(exc, "winerror", None) in CLIENT_DISCONNECT_ERRNOS or exc.errno in CLIENT_DISCONNECT_ERRNOS
+    return False
 
 
 STAGES = [
@@ -1040,23 +1049,26 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args):  # noqa: A003
         return
 
+    def safe_write_response(self, encoded: bytes, content_type: str, status: HTTPStatus = HTTPStatus.OK) -> None:
+        try:
+            self.send_response(status.value)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(encoded)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(encoded)
+        except OSError as exc:
+            if is_client_disconnect(exc):
+                return
+            raise
+
     def send_json(self, payload: object, status: HTTPStatus = HTTPStatus.OK):
         encoded = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
-        self.send_response(status.value)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(encoded)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(encoded)
+        self.safe_write_response(encoded, "application/json; charset=utf-8", status)
 
     def send_text(self, text: str, content_type: str = "text/plain; charset=utf-8"):
         encoded = text.encode("utf-8")
-        self.send_response(HTTPStatus.OK.value)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(encoded)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(encoded)
+        self.safe_write_response(encoded, content_type, HTTPStatus.OK)
 
     def do_GET(self):  # noqa: N802
         parsed = urlparse(self.path)
@@ -1074,6 +1086,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
         except (FileNotFoundError, ValueError) as exc:
             self.send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
         except OSError as exc:
+            if is_client_disconnect(exc):
+                return
             self.send_json({"error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
 
     def do_POST(self):  # noqa: N802
@@ -1088,6 +1102,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
         except (json.JSONDecodeError, ValueError) as exc:
             self.send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
         except OSError as exc:
+            if is_client_disconnect(exc):
+                return
             self.send_json({"error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
         except Exception as exc:  # pragma: no cover - defensive server guard
             append_dashboard_error(self.root, exc)
@@ -1161,6 +1177,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.send_text(text_read(path), content_type)
 
 
+class DashboardServer(ThreadingHTTPServer):
+    def handle_error(self, request, client_address):  # noqa: ANN001
+        exc_type, exc, _ = sys.exc_info()
+        if exc is not None and is_client_disconnect(exc):
+            return
+        super().handle_error(request, client_address)
+
+
 def main():
     args = parse_args()
     root = Path(args.root).expanduser().resolve()
@@ -1169,7 +1193,7 @@ def main():
     if load_dotenv is not None:
         load_dotenv(root / ".env", override=False)
     DashboardHandler.root = root
-    server = ThreadingHTTPServer((args.host, args.port), DashboardHandler)
+    server = DashboardServer((args.host, args.port), DashboardHandler)
     url_host = "localhost" if args.host in {"127.0.0.1", "0.0.0.0"} else args.host
     print(f"Verilog Agent Dashboard: http://{url_host}:{args.port}")
     print(f"Monitoring root: {root}")

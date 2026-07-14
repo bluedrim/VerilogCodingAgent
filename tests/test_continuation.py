@@ -116,6 +116,27 @@ class DashboardContinuationTests(unittest.TestCase):
         waitpid.assert_not_called()
         kill.assert_called_once_with(12345, 0)
 
+    def test_dashboard_treats_client_disconnects_as_nonfatal(self):
+        aborted = ConnectionAbortedError("client aborted")
+        win_abort = OSError("windows client aborted")
+        win_abort.winerror = 10053
+        self.assertTrue(dashboard.is_client_disconnect(aborted))
+        self.assertTrue(dashboard.is_client_disconnect(BrokenPipeError("broken pipe")))
+        self.assertTrue(dashboard.is_client_disconnect(ConnectionResetError("reset")))
+        self.assertTrue(dashboard.is_client_disconnect(win_abort))
+        self.assertFalse(dashboard.is_client_disconnect(OSError("real server error")))
+
+    def test_dashboard_server_suppresses_client_disconnect_tracebacks(self):
+        server = dashboard.DashboardServer.__new__(dashboard.DashboardServer)
+        aborted = ConnectionAbortedError("client aborted")
+        with (
+            patch.object(dashboard.sys, "exc_info", return_value=(ConnectionAbortedError, aborted, None)),
+            patch.object(dashboard.ThreadingHTTPServer, "handle_error") as parent_handle_error,
+        ):
+            server.handle_error(None, ("127.0.0.1", 12345))
+
+        parent_handle_error.assert_not_called()
+
     def test_dashboard_start_launches_agent_as_detached_process(self):
         with tempfile.TemporaryDirectory(prefix="verilog_dashboard_start_") as tmp_dir:
             root = Path(tmp_dir)
