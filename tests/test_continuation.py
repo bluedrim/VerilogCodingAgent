@@ -85,8 +85,10 @@ class DashboardContinuationTests(unittest.TestCase):
         html = dashboard.load_dashboard_html()
         self.assertIn('id="artifactList" class="scroll-list"', html)
         self.assertIn('id="failedList" class="scroll-list"', html)
-        self.assertIn('id="filePreview"', html)
-        self.assertIn('id="failedPreview"', html)
+        self.assertIn('id="filePreview" class="preview-pane"', html)
+        self.assertIn('id="failedPreview" class="preview-pane"', html)
+        self.assertIn(".preview-pane", html)
+        self.assertIn("max-height: 520px;", html)
         self.assertIn('data-preview="${escapeHtml(previewTarget)}"', html)
 
     def test_dashboard_html_places_continue_next_to_start(self):

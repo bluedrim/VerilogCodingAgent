@@ -297,6 +297,10 @@
       border-radius: 6px;
       padding: 10px;
     }
+    .preview-pane {
+      min-height: 260px;
+      max-height: 520px;
+    }
     .report-grid {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -428,11 +432,11 @@
       <div class="panel-stack">
         <div class="panel">
           <h2>File Preview</h2>
-          <pre id="filePreview">Select a recent artifact to preview it.</pre>
+          <pre id="filePreview" class="preview-pane">Select a recent artifact to preview it.</pre>
         </div>
         <div class="panel">
           <h2>Failed Attempt Preview</h2>
-          <pre id="failedPreview">Select a failed attempt to preview it.</pre>
+          <pre id="failedPreview" class="preview-pane">Select a failed attempt to preview it.</pre>
         </div>
       </div>
     </section>
