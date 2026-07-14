@@ -81,6 +81,14 @@ class DashboardContinuationTests(unittest.TestCase):
         self.assertNotIn("<!doctype html>", Path(dashboard.__file__).read_text(encoding="utf-8"))
         self.assertIn("Verilog Agent Dashboard", dashboard.load_dashboard_html())
 
+    def test_dashboard_html_has_separate_artifact_and_failed_previews(self):
+        html = dashboard.load_dashboard_html()
+        self.assertIn('id="artifactList" class="scroll-list"', html)
+        self.assertIn('id="failedList" class="scroll-list"', html)
+        self.assertIn('id="filePreview"', html)
+        self.assertIn('id="failedPreview"', html)
+        self.assertIn('data-preview="${escapeHtml(previewTarget)}"', html)
+
     def test_pid_probe_falls_back_when_wnohang_is_unavailable(self):
         with (
             patch.object(dashboard.os, "WNOHANG", None),
@@ -126,6 +134,127 @@ class DashboardContinuationTests(unittest.TestCase):
         self.assertTrue(captured["kwargs"]["close_fds"])
         self.assertEqual(captured["kwargs"]["stdin"], dashboard.subprocess.DEVNULL)
         self.assertEqual(job["options"]["llm_provider"], "gpt-oss")
+
+    def test_dashboard_derives_task_goal_and_progress_from_checkpoint(self):
+        with tempfile.TemporaryDirectory(prefix="verilog_dashboard_task_") as tmp_dir:
+            root = Path(tmp_dir)
+            run_dir = root / "output_counter_20260714_120000"
+            run_dir.mkdir()
+            (run_dir / "run_state_checkpoint.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "phase": "before",
+                        "resume_stage": "supervisor",
+                        "state": {
+                            "current_task_index": 0,
+                            "manager_plan": [
+                                {
+                                    "id": "T1",
+                                    "title": "Counter RTL",
+                                    "goal": "Implement enable-controlled counter datapath.",
+                                },
+                                {
+                                    "id": "T2",
+                                    "title": "Counter testbench",
+                                    "goal": "Verify reset and enable behavior.",
+                                },
+                            ],
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            summary = dashboard.build_run_summary(root, run_dir)
+
+        self.assertEqual(summary["manager_task_count"], 2)
+        self.assertEqual(summary["current_task_index"], 0)
+        self.assertEqual(summary["task_progress_current"], 1)
+        self.assertEqual(summary["task_progress_total"], 2)
+        self.assertEqual(summary["active_task_id"], "T1")
+        self.assertEqual(summary["active_task_title"], "Counter RTL")
+        self.assertEqual(summary["active_task_goal"], "Implement enable-controlled counter datapath.")
+
+    def test_dashboard_derives_pipeline_retries_from_checkpoint_and_config(self):
+        with tempfile.TemporaryDirectory(prefix="verilog_dashboard_retry_") as tmp_dir:
+            root = Path(tmp_dir)
+            run_dir = root / "output_counter_20260714_130000"
+            run_dir.mkdir()
+            (run_dir / "run_state_checkpoint.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "phase": "after",
+                        "resume_stage": "verilog_coding_team",
+                        "state": {
+                            "architecture_retry_count": 2,
+                            "coding_retry_count": 4,
+                            "verification_retry_count": 1,
+                            "max_retries": 10,
+                            "max_architecture_retries": 3,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (run_dir / "execution_config.json").write_text(
+                json.dumps(
+                    {
+                        "retry_limits": {
+                            "architecture": 3,
+                            "coding": 10,
+                            "verification": 10,
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            summary = dashboard.build_run_summary(root, run_dir)
+
+        stages = {stage["id"]: stage for stage in summary["stages"]}
+        self.assertEqual(stages["architecture"]["retry_count"], 2)
+        self.assertEqual(stages["architecture"]["retry_limit"], 3)
+        self.assertEqual(stages["coding"]["retry_count"], 4)
+        self.assertEqual(stages["coding"]["retry_limit"], 10)
+        self.assertEqual(stages["verification"]["retry_count"], 1)
+        self.assertEqual(stages["verification"]["retry_limit"], 10)
+
+    def test_dashboard_collects_stage_reports_from_checkpoint_state(self):
+        with tempfile.TemporaryDirectory(prefix="verilog_dashboard_reports_") as tmp_dir:
+            root = Path(tmp_dir)
+            run_dir = root / "output_counter_20260714_140000"
+            run_dir.mkdir()
+            (run_dir / "run_state_checkpoint.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "phase": "after",
+                        "resume_stage": "verilog_coding_team",
+                        "state": {
+                            "architecture_review_report": "Architecture needs reset detail.",
+                            "supervisor_review_report": "Supervisor packet is PASS.",
+                            "control_datapath_review_report": "Control path lacks enable.",
+                            "microarchitecture_report": "FSM/datapath coupling is unclear.",
+                            "verification_report": "Lint failed on counter.v.",
+                            "final_lint_report": "Final lint not run.",
+                            "blocking_report": "Current blocker is verification.",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            summary = dashboard.build_run_summary(root, run_dir)
+
+        self.assertEqual(summary["last_reports"]["architecture"], "Architecture needs reset detail.")
+        self.assertEqual(summary["last_reports"]["supervisor"], "Supervisor packet is PASS.")
+        self.assertEqual(summary["last_reports"]["control_datapath"], "Control path lacks enable.")
+        self.assertEqual(summary["last_reports"]["microarchitecture"], "FSM/datapath coupling is unclear.")
+        self.assertEqual(summary["last_reports"]["verification"], "Lint failed on counter.v.")
+        self.assertEqual(summary["last_reports"]["final_lint"], "Final lint not run.")
+        self.assertEqual(summary["last_reports"]["blocking"], "Current blocker is verification.")
 
     def test_dashboard_builds_continue_command_for_selected_run(self):
         with tempfile.TemporaryDirectory(prefix="verilog_dashboard_") as tmp_dir:

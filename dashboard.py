@@ -45,6 +45,44 @@ STAGES = [
     ("human_approval", "Human Approval", "human_approval", "", ""),
 ]
 
+RETRY_COUNT_FIELDS = {
+    "architecture": ("architecture_retry_count",),
+    "supervisor": ("supervisor_retry_count",),
+    "control_datapath": ("control_datapath_retry_count",),
+    "coding": ("coding_retry_count",),
+    "microarchitecture": ("microarchitecture_retry_count",),
+    "verification": ("verification_retry_count",),
+    "testbench": ("testbench_retry_count",),
+}
+
+RETRY_LIMIT_FIELDS = {
+    "architecture": ("max_architecture_retries",),
+    "supervisor": ("max_supervisor_retries",),
+    "control_datapath": ("max_control_datapath_retries",),
+    "coding": ("max_retries",),
+    "microarchitecture": ("max_retries",),
+    "verification": ("max_retries",),
+    "testbench": ("max_testbench_retries",),
+}
+
+STAGE_REPORT_FIELDS = {
+    "architecture": ("architecture_review_report", "last_architecture_review_report"),
+    "supervisor": ("supervisor_review_report", "last_supervisor_review_report"),
+    "control_datapath": ("control_datapath_review_report",),
+    "microarchitecture": ("microarchitecture_report", "last_microarchitecture_report"),
+    "verification": ("verification_report", "last_verification_report"),
+    "final_lint": ("final_lint_report", "last_lint_report", "lint_report"),
+}
+
+STAGE_REPORT_FILE_HINTS = {
+    "architecture": ("architecture_review",),
+    "supervisor": ("supervisor_review",),
+    "control_datapath": ("control_datapath_review",),
+    "microarchitecture": ("microarchitecture_review", "microarchitecture_static"),
+    "verification": ("verification_report", "verification_repair", "sanity_failed", "lint_failed"),
+    "final_lint": ("final_lint_report", "lint_attempt"),
+}
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Monitor Verilog Coding Agent output directories.")
@@ -250,19 +288,212 @@ def artifact_counts(run_dir: Path) -> tuple[int, int]:
     return all_count, failed_count
 
 
-def build_stages(snapshot: dict | None, summary: dict | None, artifacts: list[dict]) -> list[dict]:
+def nested_dict(source: dict | None, *keys: str) -> dict:
+    current: object = source or {}
+    for key in keys:
+        if not isinstance(current, dict):
+            return {}
+        current = current.get(key)
+    return current if isinstance(current, dict) else {}
+
+
+def first_int(default: int, *values: object) -> int:
+    for value in values:
+        if value in {None, ""}:
+            continue
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            continue
+    return default
+
+
+def load_manager_plan(run_dir: Path, snapshot: dict, summary: dict, checkpoint: dict) -> list[dict]:
+    checkpoint_state = nested_dict(checkpoint, "state")
+    for plan in (
+        snapshot.get("manager_plan"),
+        summary.get("manager_plan"),
+        nested_dict(summary, "stage_snapshot").get("manager_plan"),
+        checkpoint_state.get("manager_plan"),
+        json_read(run_dir / "manager_plan.json", []),
+    ):
+        if isinstance(plan, list):
+            return [task for task in plan if isinstance(task, dict)]
+    return []
+
+
+def active_manager_task(manager_plan: list[dict], current_task_index: int) -> dict:
+    if 0 <= current_task_index < len(manager_plan):
+        return manager_plan[current_task_index]
+    return {}
+
+
+def task_text(task: dict, *keys: str) -> str:
+    for key in keys:
+        value = task.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        if value is not None and value != "" and value != []:
+            return json.dumps(value, ensure_ascii=False)
+    return ""
+
+
+def task_progress_display(current_task_index: int, manager_task_count: int) -> tuple[int, int]:
+    if manager_task_count <= 0:
+        return 0, 0
+    if current_task_index >= manager_task_count:
+        return manager_task_count, manager_task_count
+    return max(current_task_index + 1, 1), manager_task_count
+
+
+def first_text_from_fields(sources: list[object], fields: tuple[str, ...]) -> str:
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        for field in fields:
+            value = source.get(field)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+            if value is not None and value != "" and value != []:
+                return json.dumps(value, ensure_ascii=False)
+    return ""
+
+
+def first_report_from_maps(stage_key: str, report_maps: list[object]) -> str:
+    for report_map in report_maps:
+        if isinstance(report_map, dict):
+            value = report_map.get(stage_key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return ""
+
+
+def first_report_from_files(run_dir: Path, artifacts: list[dict], stage_key: str) -> str:
+    hints = STAGE_REPORT_FILE_HINTS.get(stage_key, ())
+    if not hints:
+        return ""
+    for item in artifacts:
+        path = str(item.get("path") or "")
+        lower_path = path.lower()
+        if not lower_path.endswith((".md", ".txt", ".log")):
+            continue
+        if any(hint in lower_path for hint in hints):
+            return text_read(run_dir / path, 12000).strip()
+    return ""
+
+
+def collect_stage_reports(
+    run_dir: Path,
+    snapshot: dict,
+    summary: dict,
+    checkpoint: dict,
+    artifacts: list[dict],
+) -> dict[str, str]:
+    stage_snapshot = nested_dict(summary, "stage_snapshot")
+    checkpoint_state = nested_dict(checkpoint, "state")
+    report_maps = [
+        snapshot.get("last_reports"),
+        summary.get("last_reports"),
+        stage_snapshot.get("last_reports"),
+        checkpoint_state.get("last_reports"),
+    ]
+    field_sources = [snapshot, summary, stage_snapshot, checkpoint_state]
+    reports: dict[str, str] = {}
+    for stage_key, fields in STAGE_REPORT_FIELDS.items():
+        report = (
+            first_report_from_maps(stage_key, report_maps)
+            or first_text_from_fields(field_sources, fields)
+            or first_report_from_files(run_dir, artifacts, stage_key)
+        )
+        if report:
+            reports[stage_key] = report
+    blocking_report = first_text_from_fields(field_sources, ("blocking_report",))
+    if blocking_report and not reports.get("blocking"):
+        reports["blocking"] = blocking_report
+    return reports
+
+
+def first_stage_int(
+    stage_key: str,
+    map_sources: list[object],
+    flat_sources: list[object],
+    flat_fields: tuple[str, ...],
+    default: int = 0,
+) -> int:
+    for source in map_sources:
+        if isinstance(source, dict) and stage_key in source:
+            return first_int(default, source.get(stage_key))
+    for source in flat_sources:
+        if not isinstance(source, dict):
+            continue
+        for field in flat_fields:
+            if field in source:
+                return first_int(default, source.get(field))
+    return default
+
+
+def build_stages(
+    snapshot: dict | None,
+    summary: dict | None,
+    artifacts: list[dict],
+    checkpoint: dict | None = None,
+    execution: dict | None = None,
+    job: dict | None = None,
+) -> list[dict]:
     snapshot = snapshot or {}
     summary = summary or {}
-    flags = snapshot.get("stage_pass_flags") or summary.get("stage_snapshot", {}).get("stage_pass_flags") or {}
-    retry_counts = snapshot.get("retry_counts") or summary.get("retry_counts") or summary.get("stage_snapshot", {}).get("retry_counts") or {}
-    retry_limits = snapshot.get("retry_limits") or summary.get("retry_limits") or summary.get("stage_snapshot", {}).get("retry_limits") or {}
+    checkpoint = checkpoint or {}
+    execution = execution or {}
+    job = job or {}
+    stage_snapshot = nested_dict(summary, "stage_snapshot")
+    checkpoint_state = nested_dict(checkpoint, "state")
+    job_options = nested_dict(job, "options")
+    flags = (
+        snapshot.get("stage_pass_flags")
+        or stage_snapshot.get("stage_pass_flags")
+        or summary.get("stage_pass_flags")
+        or {}
+    )
+    retry_count_maps = [
+        snapshot.get("retry_counts"),
+        summary.get("retry_counts"),
+        stage_snapshot.get("retry_counts"),
+        checkpoint_state.get("retry_counts"),
+    ]
+    retry_limit_maps = [
+        snapshot.get("retry_limits"),
+        summary.get("retry_limits"),
+        stage_snapshot.get("retry_limits"),
+        checkpoint_state.get("retry_limits"),
+        execution.get("retry_limits"),
+    ]
+    retry_count_sources = [snapshot, summary, stage_snapshot, checkpoint_state]
+    retry_limit_sources = [snapshot, summary, stage_snapshot, checkpoint_state, execution, job_options]
     artifact_text = "\n".join(item["path"] for item in artifacts[:120])
     stages = []
     for stage_id, label, pass_key, forced_key, retry_key in STAGES:
         passed = bool(flags.get(pass_key))
         forced = bool(flags.get(forced_key)) if forced_key else False
-        count = int(retry_counts.get(retry_key, 0) or 0) if retry_key else 0
-        limit = int(retry_limits.get(retry_key, 0) or 0) if retry_key else 0
+        count = (
+            first_stage_int(
+                retry_key,
+                retry_count_maps,
+                retry_count_sources,
+                RETRY_COUNT_FIELDS.get(retry_key, ()),
+            )
+            if retry_key
+            else 0
+        )
+        limit = (
+            first_stage_int(
+                retry_key,
+                retry_limit_maps,
+                retry_limit_sources,
+                RETRY_LIMIT_FIELDS.get(retry_key, ()),
+            )
+            if retry_key
+            else 0
+        )
         active = stage_id in artifact_text.lower().replace("/", "_")
         if passed:
             status, code = "PASS", "pass"
@@ -292,6 +523,7 @@ def build_run_summary(root: Path, run_dir: Path) -> dict:
     snapshot = json_read(run_dir / "run_progress_snapshot.json", {}) or {}
     checkpoint = json_read(run_dir / "run_state_checkpoint.json", {}) or {}
     execution = json_read(run_dir / "execution_config.json", {}) or {}
+    job = json_read(run_dir / "dashboard_job.json", {}) or {}
     llm = json_read(run_dir / "llm_config.json", {}) or execution.get("llm_config", {}) or {}
     heartbeat = json_read(run_dir / "dashboard_heartbeat.json", {}) or {}
     artifacts = list_files(run_dir, "", 100)
@@ -308,20 +540,45 @@ def build_run_summary(root: Path, run_dir: Path) -> dict:
         continue_reason = "This run is complete and has no pending stage."
     else:
         continue_reason = ""
-    manager_task_count = int(
-        snapshot.get("manager_task_count")
-        or summary.get("manager_task_count")
-        or summary.get("stage_snapshot", {}).get("manager_task_count")
-        or 0
+    stage_snapshot = nested_dict(summary, "stage_snapshot")
+    checkpoint_state = nested_dict(checkpoint, "state")
+    manager_plan = load_manager_plan(run_dir, snapshot, summary, checkpoint)
+    manager_task_count = first_int(
+        len(manager_plan),
+        snapshot.get("manager_task_count"),
+        summary.get("manager_task_count"),
+        stage_snapshot.get("manager_task_count"),
     )
-    current_task_index = int(
-        snapshot.get("current_task_index")
-        or summary.get("accepted_task_count")
-        or summary.get("stage_snapshot", {}).get("current_task_index")
-        or 0
+    current_task_index = first_int(
+        0,
+        snapshot.get("current_task_index"),
+        stage_snapshot.get("current_task_index"),
+        checkpoint_state.get("current_task_index"),
+        summary.get("accepted_task_count"),
+    )
+    progress_current, progress_total = task_progress_display(current_task_index, manager_task_count)
+    active_task = active_manager_task(manager_plan, current_task_index)
+    active_task_id = (
+        snapshot.get("active_task_id")
+        or stage_snapshot.get("active_task_id")
+        or task_text(active_task, "id")
+    )
+    active_task_title = (
+        snapshot.get("active_task_title")
+        or stage_snapshot.get("active_task_title")
+        or task_text(active_task, "title")
+    )
+    active_task_goal = task_text(
+        active_task,
+        "goal",
+        "objective",
+        "description",
+        "summary",
+        "deliverable",
+        "title",
     )
     last_artifact = heartbeat.get("last_artifact") or (artifacts[0]["path"] if artifacts else "")
-    last_reports = snapshot.get("last_reports") or summary.get("stage_snapshot", {}).get("last_reports") or {}
+    last_reports = collect_stage_reports(run_dir, snapshot, summary, checkpoint, artifacts)
     return {
         "name": run_dir.name,
         "path": str(run_dir.relative_to(root)),
@@ -339,13 +596,16 @@ def build_run_summary(root: Path, run_dir: Path) -> dict:
         "failed_count": failed_count,
         "current_task_index": current_task_index,
         "manager_task_count": manager_task_count,
-        "active_task_id": snapshot.get("active_task_id") or summary.get("stage_snapshot", {}).get("active_task_id") or "",
-        "active_task_title": snapshot.get("active_task_title") or summary.get("stage_snapshot", {}).get("active_task_title") or "",
+        "task_progress_current": progress_current,
+        "task_progress_total": progress_total,
+        "active_task_id": active_task_id,
+        "active_task_title": active_task_title,
+        "active_task_goal": active_task_goal,
         "last_artifact": last_artifact,
         "last_artifact_age": "",
         "llm": llm,
         "execution": execution,
-        "stages": build_stages(snapshot, summary, artifacts),
+        "stages": build_stages(snapshot, summary, artifacts, checkpoint, execution, job),
         "last_reports": last_reports,
         "latest_report": infer_latest_report(run_dir, summary, snapshot, failed or artifacts),
         "recent_artifacts": artifacts,

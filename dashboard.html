@@ -153,6 +153,14 @@
       font-weight: 750;
       overflow-wrap: anywhere;
     }
+    .metric .value .goal-text {
+      display: block;
+      font-size: 13px;
+      line-height: 1.35;
+      font-weight: 650;
+      max-height: 72px;
+      overflow: auto;
+    }
     .metric .sub {
       color: var(--muted);
       font-size: 12px;
@@ -224,11 +232,29 @@
     .stage.force .bar span { background: var(--warn); }
     .stage.fail .bar span { background: var(--bad); }
     .stage.pass .bar span { background: var(--good); }
-    .lists {
+    .artifact-workspace {
       display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
+      grid-template-columns: minmax(0, 1fr) minmax(360px, 0.9fr);
       gap: 12px;
       margin-top: 12px;
+    }
+    .panel-stack {
+      display: grid;
+      grid-template-rows: minmax(0, auto) minmax(0, auto);
+      gap: 12px;
+      min-width: 0;
+    }
+    .scroll-list {
+      max-height: 260px;
+      overflow: auto;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fff;
+    }
+    .scroll-list table th {
+      position: sticky;
+      top: 0;
+      z-index: 1;
     }
     table {
       width: 100%;
@@ -308,7 +334,7 @@
     }
     @media (max-width: 980px) {
       header { align-items: flex-start; flex-direction: column; }
-      .grid, .two-col, .lists, .report-grid, .launch-grid { grid-template-columns: 1fr; }
+      .grid, .two-col, .artifact-workspace, .report-grid, .launch-grid { grid-template-columns: 1fr; }
       .pipeline { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     }
     @media (max-width: 560px) {
@@ -385,19 +411,27 @@
       <h2>Stage Reports</h2>
       <div class="report-grid" id="reports"></div>
     </section>
-    <section class="lists">
-      <div class="panel">
-        <h2>Recent Artifacts</h2>
-        <div id="artifactList"></div>
+    <section class="artifact-workspace">
+      <div class="panel-stack">
+        <div class="panel">
+          <h2>Recent Artifacts</h2>
+          <div id="artifactList" class="scroll-list"></div>
+        </div>
+        <div class="panel">
+          <h2>Failed Attempts</h2>
+          <div id="failedList" class="scroll-list"></div>
+        </div>
       </div>
-      <div class="panel">
-        <h2>Failed Attempts</h2>
-        <div id="failedList"></div>
+      <div class="panel-stack">
+        <div class="panel">
+          <h2>File Preview</h2>
+          <pre id="filePreview">Select a recent artifact to preview it.</pre>
+        </div>
+        <div class="panel">
+          <h2>Failed Attempt Preview</h2>
+          <pre id="failedPreview">Select a failed attempt to preview it.</pre>
+        </div>
       </div>
-    </section>
-    <section class="panel" style="margin-top:12px;">
-      <h2>File Preview</h2>
-      <pre id="filePreview">Select an artifact to preview it.</pre>
     </section>
   </main>
   <script>
@@ -411,6 +445,7 @@
     const artifactList = document.getElementById("artifactList");
     const failedList = document.getElementById("failedList");
     const filePreview = document.getElementById("filePreview");
+    const failedPreview = document.getElementById("failedPreview");
     const startForm = document.getElementById("startForm");
     const specText = document.getElementById("specText");
     const specFile = document.getElementById("specFile");
@@ -571,6 +606,8 @@
       artifactList.innerHTML = '<div class="empty">No artifacts.</div>';
       failedList.innerHTML = '<div class="empty">No failed attempts.</div>';
       latestReport.textContent = "No run selected.";
+      filePreview.textContent = "Select a recent artifact to preview it.";
+      failedPreview.textContent = "Select a failed attempt to preview it.";
       continueBtn.disabled = true;
       continueBtn.title = "Select a resumable run.";
     }
@@ -586,15 +623,16 @@
       const statusClass = clsStatus(run.status_code || "pending");
       metrics.innerHTML = [
         metric("Run Status", `<span class="pill ${statusClass}">${escapeHtml(run.status)}</span>`, run.run_id || run.name),
-        metric("Task Progress", `${run.current_task_index}/${run.manager_task_count}`, run.active_task_title || run.active_task_id || "No active task"),
+        metric("Current Task Goal", `<span class="goal-text">${escapeHtml(run.active_task_goal || "-")}</span>`, run.active_task_title || run.active_task_id || "No active task"),
+        metric("Task Progress", `${run.task_progress_current}/${run.task_progress_total}`, `${run.current_task_index} completed of ${run.manager_task_count}`),
         metric("Artifacts", String(run.artifact_count), `${run.failed_count} failed attempt files`),
         metric("Last Artifact", escapeHtml(run.last_artifact || "-"), run.last_artifact_age || "")
       ].join("");
       pipeline.innerHTML = (run.stages || []).map(stageHtml).join("");
       renderReports(run);
       latestReport.textContent = run.latest_report || "No report yet.";
-      artifactList.innerHTML = tableFor(run.recent_artifacts || []);
-      failedList.innerHTML = tableFor(run.failed_attempts || []);
+      artifactList.innerHTML = tableFor(run.recent_artifacts || [], "artifact");
+      failedList.innerHTML = tableFor(run.failed_attempts || [], "failed");
       bindFileLinks();
     }
 
@@ -606,10 +644,11 @@
       const count = Number(stage.retry_count || 0);
       const limit = Number(stage.retry_limit || 0);
       const pct = limit > 0 ? Math.min(100, Math.round((count / limit) * 100)) : (count > 0 ? 100 : 0);
+      const retryText = limit > 0 ? `retry ${count} / ${limit}` : `retry ${count}`;
       return `<div class="stage ${escapeHtml(stage.status_code)}">
         <div class="stage-title">${escapeHtml(stage.label)}</div>
         <span class="pill ${clsStatus(stage.status_code)}">${escapeHtml(stage.status)}</span>
-        <div class="stage-meta">retry ${count}${limit ? " / " + limit : ""}</div>
+        <div class="stage-meta">${escapeHtml(retryText)}</div>
         <div class="bar"><span style="width:${pct}%"></span></div>
       </div>`;
     }
@@ -620,13 +659,25 @@
         reports.innerHTML = '<div class="empty">No reports yet.</div>';
         return;
       }
-      reports.innerHTML = entries.map(([name, text]) => `<div class="report-item"><h3>${escapeHtml(name)}</h3><p>${escapeHtml(text || "-")}</p></div>`).join("");
+      reports.innerHTML = entries.map(([name, text]) => `<div class="report-item"><h3>${escapeHtml(reportName(name))}</h3><p>${escapeHtml(text || "-")}</p></div>`).join("");
     }
 
-    function tableFor(items) {
+    function reportName(name) {
+      return {
+        architecture: "Architecture",
+        supervisor: "Supervisor",
+        control_datapath: "Control/Data Path",
+        microarchitecture: "Microarchitecture",
+        verification: "Verification",
+        final_lint: "Final Lint",
+        blocking: "Blocking Report"
+      }[name] || name;
+    }
+
+    function tableFor(items, previewTarget) {
       if (!items.length) return '<div class="empty">No files.</div>';
       const rows = items.map(item => `<tr>
-        <td class="path"><a class="file-link" href="#" data-path="${escapeHtml(item.path)}">${escapeHtml(item.path)}</a></td>
+        <td class="path"><a class="file-link" href="#" data-preview="${escapeHtml(previewTarget)}" data-path="${escapeHtml(item.path)}">${escapeHtml(item.path)}</a></td>
         <td>${escapeHtml(item.size_display)}</td>
         <td>${escapeHtml(item.mtime_display)}</td>
       </tr>`).join("");
@@ -638,12 +689,13 @@
         link.addEventListener("click", async event => {
           event.preventDefault();
           const path = link.getAttribute("data-path");
+          const target = link.getAttribute("data-preview") === "failed" ? failedPreview : filePreview;
           try {
             const res = await fetch(`/api/file?dir=${encodeURIComponent(state.selected)}&path=${encodeURIComponent(path)}`, { cache: "no-store" });
             if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-            filePreview.textContent = await res.text();
+            target.textContent = await res.text();
           } catch (err) {
-            filePreview.textContent = `Could not load ${path}: ${err.message}`;
+            target.textContent = `Could not load ${path}: ${err.message}`;
           }
         });
       });
