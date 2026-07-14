@@ -771,6 +771,15 @@ def append_dashboard_error(root: Path, exc: BaseException) -> None:
         return
 
 
+def agent_process_options() -> dict:
+    if os.name == "nt":
+        creationflags = 0
+        creationflags |= getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        creationflags |= getattr(subprocess, "DETACHED_PROCESS", 0)
+        return {"creationflags": creationflags}
+    return {"start_new_session": True}
+
+
 def launch_agent_process(command: list[str], root: Path, stdout_path: Path, env: dict[str, str]) -> subprocess.Popen:
     stdout_handle = stdout_path.open("ab")
     try:
@@ -782,7 +791,7 @@ def launch_agent_process(command: list[str], root: Path, stdout_path: Path, env:
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
             close_fds=True,
-            start_new_session=True,
+            **agent_process_options(),
         )
     finally:
         stdout_handle.close()

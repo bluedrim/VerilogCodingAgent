@@ -137,6 +137,16 @@ class DashboardContinuationTests(unittest.TestCase):
 
         parent_handle_error.assert_not_called()
 
+    def test_dashboard_uses_windows_detached_process_flags(self):
+        with (
+            patch.object(dashboard.os, "name", "nt"),
+            patch.object(dashboard.subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200, create=True),
+            patch.object(dashboard.subprocess, "DETACHED_PROCESS", 0x8, create=True),
+        ):
+            options = dashboard.agent_process_options()
+
+        self.assertEqual(options, {"creationflags": 0x208})
+
     def test_dashboard_start_launches_agent_as_detached_process(self):
         with tempfile.TemporaryDirectory(prefix="verilog_dashboard_start_") as tmp_dir:
             root = Path(tmp_dir)
