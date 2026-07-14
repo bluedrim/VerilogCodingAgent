@@ -118,6 +118,63 @@ def iso_from_mtime(path: Path) -> str:
         return ""
 
 
+def parse_datetime(value: object) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def file_mtime_datetime(path: Path) -> datetime | None:
+    try:
+        return datetime.fromtimestamp(path.stat().st_mtime, timezone.utc)
+    except OSError:
+        return None
+
+
+def runtime_display(started: datetime | None, ended: datetime | None) -> tuple[int, str]:
+    if not started:
+        return 0, "runtime unknown"
+    ended = ended or datetime.now(timezone.utc)
+    seconds = max(0, int((ended - started).total_seconds()))
+    minutes = seconds // 60
+    if minutes < 1 and seconds > 0:
+        return 0, "<1 min"
+    if minutes < 60:
+        return minutes, f"{minutes} min"
+    hours = minutes // 60
+    remaining = minutes % 60
+    return minutes, f"{hours}h {remaining}m"
+
+
+def run_time_bounds(run_dir: Path, summary: dict, checkpoint: dict, heartbeat: dict, job: dict, active: bool) -> tuple[datetime | None, datetime | None]:
+    started = (
+        parse_datetime(job.get("created_at"))
+        or parse_datetime(job.get("started_at"))
+        or parse_datetime(summary.get("run_started_at"))
+        or file_mtime_datetime(run_dir)
+    )
+    if active:
+        return started, datetime.now(timezone.utc)
+    ended = (
+        parse_datetime(summary.get("completed_at"))
+        or parse_datetime(summary.get("finished_at"))
+        or parse_datetime(summary.get("ended_at"))
+        or parse_datetime(checkpoint.get("saved_at"))
+        or parse_datetime(heartbeat.get("updated_at"))
+        or file_mtime_datetime(run_dir)
+    )
+    return started, ended
+
+
 def human_size(size: int) -> str:
     units = ["B", "KB", "MB", "GB"]
     value = float(size)
@@ -530,6 +587,8 @@ def build_run_summary(root: Path, run_dir: Path) -> dict:
     failed = list_files(run_dir, "failed_attempts", 80)
     artifact_count, failed_count = artifact_counts(run_dir)
     status, status_code, active = run_status(run_dir, summary, heartbeat)
+    started_at, ended_at = run_time_bounds(run_dir, summary, checkpoint, heartbeat, job, active)
+    runtime_minutes, runtime_text = runtime_display(started_at, ended_at)
     resume_stage = str(checkpoint.get("resume_stage") or "")
     can_continue = bool(checkpoint and resume_stage and not active)
     if active:
@@ -591,6 +650,10 @@ def build_run_summary(root: Path, run_dir: Path) -> dict:
         "checkpoint_phase": checkpoint.get("phase") or "",
         "checkpoint_saved_at": checkpoint.get("saved_at") or "",
         "run_id": summary.get("run_id") or execution.get("run_id") or "",
+        "runtime_minutes": runtime_minutes,
+        "runtime_display": runtime_text,
+        "started_at": started_at.isoformat() if started_at else "",
+        "ended_at": ended_at.isoformat() if ended_at else "",
         "updated_at": heartbeat.get("updated_at") or iso_from_mtime(run_dir),
         "artifact_count": artifact_count,
         "failed_count": failed_count,

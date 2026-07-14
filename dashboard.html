@@ -245,7 +245,7 @@
       min-width: 0;
     }
     .scroll-list {
-      max-height: 260px;
+      max-height: 520px;
       overflow: auto;
       border: 1px solid var(--line);
       border-radius: 6px;
@@ -314,13 +314,16 @@
       font-size: 12px;
       color: var(--muted);
     }
-    .report-item p {
+    .report-body {
       margin: 0;
       font-size: 12px;
       line-height: 1.45;
       overflow-wrap: anywhere;
-      max-height: 120px;
+      white-space: pre-wrap;
+      word-break: break-word;
+      max-height: 180px;
       overflow: auto;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     }
     .empty {
       color: var(--muted);
@@ -353,7 +356,6 @@
     </div>
     <div class="toolbar">
       <select id="runSelect" aria-label="Run selector"></select>
-      <button id="continueBtn" type="button" disabled>Continue</button>
       <button id="refreshBtn" type="button">Refresh</button>
       <span id="autoState" class="pill info">Auto 2s</span>
     </div>
@@ -389,7 +391,8 @@
               Model, API, retry, lint, and testbench options are read from .env or environment variables.
             </div>
             <div class="launch-actions">
-              <button id="startBtn" type="submit">Start Run</button>
+              <button id="startBtn" type="submit">Start new task</button>
+              <button id="continueBtn" type="button" disabled>Continue task</button>
               <span id="startStatus" class="status-line">Ready.</span>
             </div>
           </div>
@@ -621,12 +624,13 @@
         ? "This run is already active."
         : (run.can_continue ? `Continue from ${run.resume_stage}` : (run.continue_reason || "No pending work."));
       const statusClass = clsStatus(run.status_code || "pending");
+      const runStatusSub = `${run.run_id || run.name} | runtime ${run.runtime_display || "unknown"}`;
       metrics.innerHTML = [
-        metric("Run Status", `<span class="pill ${statusClass}">${escapeHtml(run.status)}</span>`, run.run_id || run.name),
-        metric("Current Task Goal", `<span class="goal-text">${escapeHtml(run.active_task_goal || "-")}</span>`, run.active_task_title || run.active_task_id || "No active task"),
+        metric("Run Status", `<span class="pill ${statusClass}">${escapeHtml(run.status)}</span>`, runStatusSub),
         metric("Task Progress", `${run.task_progress_current}/${run.task_progress_total}`, `${run.current_task_index} completed of ${run.manager_task_count}`),
         metric("Artifacts", String(run.artifact_count), `${run.failed_count} failed attempt files`),
-        metric("Last Artifact", escapeHtml(run.last_artifact || "-"), run.last_artifact_age || "")
+        metric("Last Artifact", escapeHtml(run.last_artifact || "-"), run.last_artifact_age || ""),
+        metric("Current Task Goal", `<span class="goal-text">${escapeHtml(run.active_task_goal || "-")}</span>`, run.active_task_title || run.active_task_id || "No active task")
       ].join("");
       pipeline.innerHTML = (run.stages || []).map(stageHtml).join("");
       renderReports(run);
@@ -659,7 +663,7 @@
         reports.innerHTML = '<div class="empty">No reports yet.</div>';
         return;
       }
-      reports.innerHTML = entries.map(([name, text]) => `<div class="report-item"><h3>${escapeHtml(reportName(name))}</h3><p>${escapeHtml(text || "-")}</p></div>`).join("");
+      reports.innerHTML = entries.map(([name, text]) => `<div class="report-item"><h3>${escapeHtml(reportName(name))}</h3><div class="report-body">${escapeHtml(formatReportText(text || "-"))}</div></div>`).join("");
     }
 
     function reportName(name) {
@@ -672,6 +676,14 @@
         final_lint: "Final Lint",
         blocking: "Blocking Report"
       }[name] || name;
+    }
+
+    function formatReportText(text) {
+      return String(text || "-")
+        .replace(/\r\n/g, "\n")
+        .replace(/\r/g, "\n")
+        .replace(/\n{3,}/g, "\n\n")
+        .trim();
     }
 
     function tableFor(items, previewTarget) {

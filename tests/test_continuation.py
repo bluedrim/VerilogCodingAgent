@@ -89,6 +89,22 @@ class DashboardContinuationTests(unittest.TestCase):
         self.assertIn('id="failedPreview"', html)
         self.assertIn('data-preview="${escapeHtml(previewTarget)}"', html)
 
+    def test_dashboard_html_places_continue_next_to_start(self):
+        html = dashboard.load_dashboard_html()
+        toolbar = html.split('<div class="toolbar">', 1)[1].split("</div>", 1)[0]
+        launch_actions = html.split('<div class="launch-actions">', 1)[1].split("</div>", 1)[0]
+        self.assertNotIn("continueBtn", toolbar)
+        self.assertIn("Start new task", launch_actions)
+        self.assertIn("Continue task", launch_actions)
+        self.assertLess(launch_actions.index("startBtn"), launch_actions.index("continueBtn"))
+
+    def test_dashboard_html_preserves_stage_report_formatting(self):
+        html = dashboard.load_dashboard_html()
+        self.assertIn("white-space: pre-wrap;", html)
+        self.assertIn("function formatReportText", html)
+        self.assertIn('class="report-body"', html)
+        self.assertNotIn("<p>${escapeHtml(text || \"-\")}</p>", html)
+
     def test_pid_probe_falls_back_when_wnohang_is_unavailable(self):
         with (
             patch.object(dashboard.os, "WNOHANG", None),
@@ -255,6 +271,40 @@ class DashboardContinuationTests(unittest.TestCase):
         self.assertEqual(summary["last_reports"]["verification"], "Lint failed on counter.v.")
         self.assertEqual(summary["last_reports"]["final_lint"], "Final lint not run.")
         self.assertEqual(summary["last_reports"]["blocking"], "Current blocker is verification.")
+
+    def test_dashboard_displays_runtime_in_minutes(self):
+        with tempfile.TemporaryDirectory(prefix="verilog_dashboard_runtime_") as tmp_dir:
+            root = Path(tmp_dir)
+            run_dir = root / "output_counter_20260714_150000"
+            run_dir.mkdir()
+            (run_dir / "dashboard_job.json").write_text(
+                json.dumps(
+                    {
+                        "created_at": "2026-07-14T01:00:00+00:00",
+                        "started_at": "2026-07-14T01:00:00+00:00",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (run_dir / "run_state_checkpoint.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "phase": "after",
+                        "resume_stage": "verification_team",
+                        "saved_at": "2026-07-14T01:02:05+00:00",
+                        "state": {},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            summary = dashboard.build_run_summary(root, run_dir)
+
+        self.assertEqual(summary["runtime_minutes"], 2)
+        self.assertEqual(summary["runtime_display"], "2 min")
+        self.assertEqual(summary["started_at"], "2026-07-14T01:00:00+00:00")
+        self.assertEqual(summary["ended_at"], "2026-07-14T01:02:05+00:00")
 
     def test_dashboard_builds_continue_command_for_selected_run(self):
         with tempfile.TemporaryDirectory(prefix="verilog_dashboard_") as tmp_dir:
