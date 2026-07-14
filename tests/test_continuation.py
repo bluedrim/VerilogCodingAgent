@@ -76,6 +76,17 @@ class CheckpointPersistenceTests(unittest.TestCase):
 
 
 class DashboardContinuationTests(unittest.TestCase):
+    def test_pid_probe_falls_back_when_wnohang_is_unavailable(self):
+        with (
+            patch.object(dashboard.os, "WNOHANG", None),
+            patch.object(dashboard.os, "waitpid") as waitpid,
+            patch.object(dashboard.os, "kill", return_value=None) as kill,
+        ):
+            self.assertTrue(dashboard.pid_is_running(12345))
+
+        waitpid.assert_not_called()
+        kill.assert_called_once_with(12345, 0)
+
     def test_dashboard_builds_continue_command_for_selected_run(self):
         with tempfile.TemporaryDirectory(prefix="verilog_dashboard_") as tmp_dir:
             root = Path(tmp_dir)

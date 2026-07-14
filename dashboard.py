@@ -781,19 +781,25 @@ def pid_is_running(pid: object) -> bool:
         return False
     if numeric_pid <= 0:
         return False
-    try:
-        waited_pid, _ = os.waitpid(numeric_pid, os.WNOHANG)
-        if waited_pid == numeric_pid:
-            return False
-        return True
-    except ChildProcessError:
+    waitpid = getattr(os, "waitpid", None)
+    nohang = getattr(os, "WNOHANG", None)
+    if callable(waitpid) and nohang is not None:
         try:
-            os.kill(numeric_pid, 0)
+            waited_pid, _ = waitpid(numeric_pid, nohang)
+            if waited_pid == numeric_pid:
+                return False
             return True
-        except ProcessLookupError:
-            return False
-        except PermissionError:
-            return True
+        except (ChildProcessError, OSError):
+            pass
+    try:
+        os.kill(numeric_pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
 
 
 def run_process_is_active(run_dir: Path, heartbeat: dict | None) -> bool:
