@@ -98,7 +98,15 @@ class DashboardContinuationTests(unittest.TestCase):
         self.assertNotIn("continueBtn", toolbar)
         self.assertIn("Start new task", launch_actions)
         self.assertIn("Continue task", launch_actions)
+        self.assertIn("Stop task", launch_actions)
         self.assertLess(launch_actions.index("startBtn"), launch_actions.index("continueBtn"))
+        self.assertLess(launch_actions.index("continueBtn"), launch_actions.index("stopBtn"))
+
+    def test_dashboard_html_can_stop_selected_run(self):
+        html = dashboard.load_dashboard_html()
+        self.assertIn('id="stopBtn" class="danger"', html)
+        self.assertIn('stopBtn.addEventListener("click", stopRun)', html)
+        self.assertIn('postJson("/api/stop"', html)
 
     def test_dashboard_html_preserves_stage_report_formatting(self):
         html = dashboard.load_dashboard_html()
@@ -106,6 +114,13 @@ class DashboardContinuationTests(unittest.TestCase):
         self.assertIn("function formatReportText", html)
         self.assertIn('class="report-body"', html)
         self.assertNotIn("<p>${escapeHtml(text || \"-\")}</p>", html)
+
+    def test_dashboard_html_displays_live_main_console_output(self):
+        html = dashboard.load_dashboard_html()
+        self.assertIn('id="consoleOutput" class="console-pane"', html)
+        self.assertIn('id="consoleStatus" class="pill info"', html)
+        self.assertIn("function renderConsole(run)", html)
+        self.assertIn("run.console_output", html)
 
     def test_pid_probe_falls_back_when_wnohang_is_unavailable(self):
         with (
@@ -117,6 +132,36 @@ class DashboardContinuationTests(unittest.TestCase):
 
         waitpid.assert_not_called()
         kill.assert_called_once_with(12345, 0)
+
+    def test_active_probe_checks_job_pid_after_stale_heartbeat_pid(self):
+        with tempfile.TemporaryDirectory(prefix="verilog_dashboard_pid_") as tmp_dir:
+            run_dir = Path(tmp_dir)
+            (run_dir / "dashboard_job.json").write_text(
+                json.dumps({"pid": 222}),
+                encoding="utf-8",
+            )
+            heartbeat = {"process_id": 111}
+            with patch.object(
+                dashboard,
+                "pid_is_running",
+                side_effect=lambda pid: int(pid) == 222,
+            ):
+                active = dashboard.run_process_is_active(run_dir, heartbeat)
+
+        self.assertTrue(active)
+
+    def test_stale_running_project_is_displayed_as_stopped(self):
+        with tempfile.TemporaryDirectory(prefix="verilog_dashboard_stale_") as tmp_dir:
+            run_dir = Path(tmp_dir)
+            (run_dir / "execution_config.json").write_text("{}", encoding="utf-8")
+            with patch.object(dashboard, "run_process_is_active", return_value=False):
+                status = dashboard.run_status(
+                    run_dir,
+                    {"run_status": "running"},
+                    {"process_id": 999},
+                )
+
+        self.assertEqual(status, ("stopped", "stopped", False))
 
     def test_dashboard_treats_client_disconnects_as_nonfatal(self):
         aborted = ConnectionAbortedError("client aborted")
@@ -182,6 +227,7 @@ class DashboardContinuationTests(unittest.TestCase):
         self.assertTrue(captured["kwargs"]["start_new_session"])
         self.assertTrue(captured["kwargs"]["close_fds"])
         self.assertEqual(captured["kwargs"]["stdin"], dashboard.subprocess.DEVNULL)
+        self.assertEqual(captured["kwargs"]["env"]["PYTHONUNBUFFERED"], "1")
         self.assertEqual(job["options"]["llm_provider"], "gpt-oss")
 
     def test_dashboard_derives_task_goal_and_progress_from_checkpoint(self):
@@ -339,6 +385,88 @@ class DashboardContinuationTests(unittest.TestCase):
         self.assertEqual(summary["started_at"], "2026-07-14T01:00:00+00:00")
         self.assertEqual(summary["ended_at"], "2026-07-14T01:02:05+00:00")
 
+    def test_dashboard_summary_includes_main_console_tail(self):
+        with tempfile.TemporaryDirectory(prefix="verilog_dashboard_console_") as tmp_dir:
+            root = Path(tmp_dir)
+            run_dir = root / "output_counter_20260714_151000"
+            run_dir.mkdir()
+            (run_dir / "dashboard_job.json").write_text(
+                json.dumps({"stdout_log": "dashboard_stdout.log"}),
+                encoding="utf-8",
+            )
+            (run_dir / "dashboard_stdout.log").write_text(
+                "---MANAGER: Planning---\n---VERILOG CODING TEAM: Implementing T1---\n",
+                encoding="utf-8",
+            )
+
+            summary = dashboard.build_run_summary(root, run_dir)
+
+        self.assertEqual(summary["stdout_log"], "dashboard_stdout.log")
+        self.assertIn("---MANAGER: Planning---", summary["console_output"])
+        self.assertIn("---VERILOG CODING TEAM: Implementing T1---", summary["console_output"])
+        self.assertFalse(summary["console_truncated"])
+        self.assertGreater(summary["console_bytes"], 0)
+
+    def test_console_tail_marks_omitted_earlier_output(self):
+        with tempfile.TemporaryDirectory(prefix="verilog_dashboard_console_tail_") as tmp_dir:
+            path = Path(tmp_dir) / "dashboard_stdout.log"
+            path.write_text("first line\nsecond line\nthird line\n", encoding="utf-8")
+
+            output, truncated, size = dashboard.tail_text_read(path, 18)
+
+        self.assertTrue(truncated)
+        self.assertIn("Earlier console output omitted", output)
+        self.assertIn("third line", output)
+        self.assertEqual(size, len("first line\nsecond line\nthird line\n".encode()))
+
+    def test_dashboard_stop_marks_project_stopped_and_keeps_continue_checkpoint(self):
+        with tempfile.TemporaryDirectory(prefix="verilog_dashboard_stop_") as tmp_dir:
+            root = Path(tmp_dir)
+            run_dir = root / "output_counter_20260714_152000"
+            run_dir.mkdir()
+            (run_dir / "dashboard_job.json").write_text(
+                json.dumps(
+                    {
+                        "pid": 515151,
+                        "dashboard_status": "running",
+                        "stdout_log": "dashboard_stdout.log",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (run_dir / "dashboard_heartbeat.json").write_text(
+                json.dumps({"process_id": 515151}),
+                encoding="utf-8",
+            )
+            (run_dir / "run_state_checkpoint.json").write_text(
+                json.dumps({"resume_stage": "verilog_coding_team", "state": {}}),
+                encoding="utf-8",
+            )
+
+            with patch.object(
+                dashboard,
+                "terminate_agent_process",
+                return_value=(True, "Stop signal sent."),
+            ) as terminate:
+                result = dashboard.stop_agent_run(root, {"dir": run_dir.name})
+
+            job = json.loads((run_dir / "dashboard_job.json").read_text(encoding="utf-8"))
+            heartbeat = json.loads(
+                (run_dir / "dashboard_heartbeat.json").read_text(encoding="utf-8")
+            )
+            summary = dashboard.build_run_summary(root, run_dir)
+
+        terminate.assert_called_once_with(run_dir.resolve(), 515151)
+        self.assertEqual(job["dashboard_status"], "stopped")
+        self.assertEqual(heartbeat["process_id"], 0)
+        self.assertTrue(result["signal_sent"])
+        self.assertTrue(result["can_continue"])
+        self.assertEqual(result["resume_stage"], "verilog_coding_team")
+        self.assertEqual(summary["status"], "stopped")
+        self.assertTrue(summary["manually_stopped"])
+        self.assertFalse(summary["can_stop"])
+        self.assertTrue(summary["can_continue"])
+
     def test_dashboard_builds_continue_command_for_selected_run(self):
         with tempfile.TemporaryDirectory(prefix="verilog_dashboard_") as tmp_dir:
             root = Path(tmp_dir)
@@ -351,6 +479,15 @@ class DashboardContinuationTests(unittest.TestCase):
                         "phase": "after",
                         "resume_stage": "verilog_coding_team",
                         "state": {},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (run_dir / "dashboard_job.json").write_text(
+                json.dumps(
+                    {
+                        "dashboard_status": "stopped",
+                        "stopped_at": "2026-07-13T12:10:00+00:00",
                     }
                 ),
                 encoding="utf-8",
@@ -381,6 +518,8 @@ class DashboardContinuationTests(unittest.TestCase):
         self.assertTrue(captured["kwargs"]["start_new_session"])
         self.assertTrue(captured["kwargs"]["close_fds"])
         self.assertEqual(result["resume_stage"], "verilog_coding_team")
+        self.assertEqual(job["dashboard_status"], "running")
+        self.assertEqual(job["stopped_at"], "")
         self.assertEqual(job["options"]["llm_provider"], "gpt-oss")
         self.assertEqual(job["continuation_count"], 1)
 

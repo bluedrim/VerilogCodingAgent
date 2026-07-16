@@ -35,6 +35,7 @@ The dashboard watches `output_*` artifact directories and shows:
 - Stage pass/fail/force-forward state.
 - Retry counts and retry limits.
 - Latest reports from architecture, Supervisor, Control/Data Path, coding, microarchitecture, verification, and final lint.
+- Live `main.py` console output, including `print()` messages and tracebacks.
 - Recent files under `logs/`.
 - Files under `failed_attempts/`.
 - Quick preview for any artifact file.
@@ -45,13 +46,19 @@ You can also start a new run directly from the dashboard:
 - Or choose a `.md`, `.markdown`, or `.txt` file; the browser loads its content
   into the requirement box before starting.
 - Select only the LLM provider in the dashboard.
-- Click `Start Run`.
+- Click `Start new task`.
 
 To continue an interrupted or failed run, select its output directory and click
-`Continue`. The button is enabled only when a saved checkpoint has pending work
+`Continue task`. The button is enabled only when a saved checkpoint has pending work
 and no process is already running for that directory. The agent restores the
 Manager plan, current task, review feedback, RTL candidates, accepted files, and
 retry counters, then enters the stage following the last completed node.
+
+Select any running or stale project and click `Stop task` to terminate its
+dashboard-launched `main.py` process when present and persist the project status
+as `stopped`. The checkpoint is preserved, so a stopped project can later use
+`Continue task`. Runs whose process has already exited are automatically shown
+as stopped instead of remaining incorrectly marked as running.
 
 The dashboard saves the submitted Markdown/text as `dashboard_requirement.md`
 inside the new `output_*` artifact directory and starts `main.py` in the
@@ -197,6 +204,7 @@ Current prompt files:
 - `prompts/verilog_coding_repair.md`
 - `prompts/verilog_review_gate_repair.md`
 - `prompts/verilog_coding_closure_review.md`
+- `prompts/verilog_coding_quality_review.md`
 - `prompts/microarchitecture_review.md`
 - `prompts/verification.md`
 - `prompts/testbench.md`
@@ -234,6 +242,7 @@ Important artifacts:
 - `<artifact-dir>/logs/*_control_datapath_review_attempt_*.md`
 - `<artifact-dir>/logs/*_coding_attempt_*.json`
 - `<artifact-dir>/logs/*_coding_closure_audit_*_attempt_*.md`
+- `<artifact-dir>/logs/*_coding_quality_audit_*_attempt_*.md`
 - `<artifact-dir>/logs/*_microarchitecture_review_attempt_*.md`
 - `<artifact-dir>/compile_order.f`
 - `<artifact-dir>/file_manifest.json`
@@ -251,6 +260,12 @@ On review-driven coding retries, the Coding Closure Auditor checks whether the
 current RTL visibly closes the active repair backlog. A failed closure audit is
 fed into the focused review-gate repair pass, and the repaired RTL is audited
 once more before it can proceed to Microarchitecture Review.
+
+Every Coding Team attempt also builds a cycle-accurate RTL action plan and runs
+the generated files through a Coding Quality Auditor. The auditor blocks only
+objective functional, timing, reset, protocol, width, synthesizability, or plan
+coverage defects. Its actionable report is sent to the focused repair pass, and
+the repaired RTL is audited again before leaving the Coding Team.
 
 If `verilator` or `iverilog` is installed, syntax lint runs automatically. If neither
 tool is available, lint is skipped and the skip is recorded in the logs. Use

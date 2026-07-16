@@ -33,6 +33,20 @@ Rules:
   - Use explicit control signals for enables, mux selects, load/clear, valid/ready, done/error.
   - Keep datapath registers and arithmetic/comparison logic readable and grouped.
   - Avoid mixing unrelated state updates into one opaque always block.
+- Implement cycle-accurate behavior, not just the expected signal names:
+  - Make transaction acceptance, first update edge, output visibility, completion, and return-to-idle timing match the plans.
+  - Give simultaneous controls an explicit priority when more than one can be asserted.
+  - Support stalls and consecutive transactions when the required protocol permits them.
+- Make register behavior complete:
+  - Use nonblocking assignments in sequential blocks and blocking assignments for combinational next-state/datapath selection.
+  - Give every combinational next-state/control/output signal a default assignment before conditional overrides.
+  - Include a safe default branch in case statements and ensure illegal states recover deterministically when an FSM is used.
+  - Ensure each register has one clear procedural owner and intentional reset, load, clear, enable, and hold behavior.
+- Make numeric behavior exact:
+  - Size constants, arithmetic intermediates, counters, compares, slices, and extensions deliberately.
+  - Resolve signed/unsigned behavior explicitly and avoid accidental truncation.
+  - Check terminal-count and off-by-one behavior with a short mental cycle trace.
+- Before emitting files, internally trace reset, one normal transaction, boundary values, stalls, and back-to-back transactions as applicable. Output only the resulting files, not the trace.
 - Use Verilog always blocks only: always @(posedge clk ...), always @(*), assign, reg, and wire.
 - Never use SystemVerilog constructs such as logic, always_ff, always_comb, interface, package, typedef, enum, struct, unique, assert, or import.
 - Give every registered control and datapath signal an explicit reset or documented reason it does not need one.
@@ -42,6 +56,7 @@ Rules:
 - Before returning, self-check that clock/reset-like interfaces have sequential logic when required.
 - Before returning, self-check that control signals and datapath signals are explicit enough for the microarchitecture reviewer.
 - Before returning, self-check that the code would pass a basic Verilog syntax lint.
+- Before returning, self-check every item in the RTL implementation quality contract and Mandatory RTL coding action plan against a concrete line/block in the returned files.
 - Preferred output is this FILE block format, repeated once per file:
   FILE: module_name.v
   ```verilog

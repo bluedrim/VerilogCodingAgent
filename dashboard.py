@@ -6,6 +6,7 @@ import json
 import mimetypes
 import os
 import re
+import signal
 import subprocess
 import sys
 import traceback
@@ -23,6 +24,7 @@ except ModuleNotFoundError:  # pragma: no cover - dashboard still works without 
 
 ROOT = Path(__file__).resolve().parent
 MAX_FILE_PREVIEW_BYTES = 1_000_000
+MAX_CONSOLE_PREVIEW_BYTES = 500_000
 MAX_START_PAYLOAD_BYTES = 1_000_000
 MAX_SPEC_CHARS = 500_000
 CLIENT_DISCONNECT_ERRNOS = {53, 54, 10053, 10054}
@@ -120,6 +122,28 @@ def text_read(path: Path, limit: int = MAX_FILE_PREVIEW_BYTES) -> str:
     return data.decode("utf-8", errors="replace")
 
 
+def tail_text_read(path: Path, limit: int = MAX_CONSOLE_PREVIEW_BYTES) -> tuple[str, bool, int]:
+    try:
+        size = path.stat().st_size
+        start = max(size - max(limit, 1), 0)
+        with path.open("rb") as handle:
+            handle.seek(start)
+            data = handle.read(max(limit, 1))
+    except FileNotFoundError:
+        return "", False, 0
+    except OSError as exc:
+        return f"Could not read console log: {exc}", False, 0
+
+    truncated = start > 0
+    if truncated:
+        newline = data.find(b"\n")
+        if newline >= 0:
+            data = data[newline + 1 :]
+        prefix = b"[Earlier console output omitted from dashboard preview]\n"
+        data = prefix + data
+    return data.decode("utf-8", errors="replace"), truncated, size
+
+
 def iso_from_mtime(path: Path) -> str:
     try:
         return datetime.fromtimestamp(path.stat().st_mtime).astimezone().isoformat(timespec="seconds")
@@ -174,7 +198,9 @@ def run_time_bounds(run_dir: Path, summary: dict, checkpoint: dict, heartbeat: d
     if active:
         return started, datetime.now(timezone.utc)
     ended = (
-        parse_datetime(summary.get("completed_at"))
+        parse_datetime(job.get("stopped_at"))
+        or parse_datetime(job.get("ended_at"))
+        or parse_datetime(summary.get("completed_at"))
         or parse_datetime(summary.get("finished_at"))
         or parse_datetime(summary.get("ended_at"))
         or parse_datetime(checkpoint.get("saved_at"))
@@ -256,40 +282,45 @@ def pid_is_running(pid: object) -> bool:
 
 
 def run_process_is_active(run_dir: Path, heartbeat: dict | None) -> bool:
-    if heartbeat and heartbeat.get("process_id"):
-        return pid_is_running(heartbeat.get("process_id"))
     job = json_read(run_dir / "dashboard_job.json", {}) or {}
-    if job.get("pid"):
-        return pid_is_running(job.get("pid"))
+    pids = []
+    for candidate in (
+        (heartbeat or {}).get("process_id"),
+        job.get("pid"),
+    ):
+        if candidate not in {None, "", 0, "0"} and candidate not in pids:
+            pids.append(candidate)
+    if pids:
+        return any(pid_is_running(pid) for pid in pids)
     return heartbeat_is_recent(heartbeat)
 
 
 def run_status(run_dir: Path, summary: dict | None, heartbeat: dict | None) -> tuple[str, str, bool]:
-    status = ""
-    code = "pending"
-    if summary:
-        status = str(summary.get("run_status") or "")
-        if status == "passed":
-            code = "pass"
-        elif status == "failed":
-            code = "fail"
-        elif status:
-            code = "pending"
-    if not status:
-        failed_files = list((run_dir / "failed_attempts").glob("*")) if (run_dir / "failed_attempts").is_dir() else []
-        if failed_files:
-            status = "running with failures"
-            code = "running"
-        elif (run_dir / "execution_config.json").exists():
-            status = "running"
-            code = "running"
-        else:
-            status = "incomplete"
     active = run_process_is_active(run_dir, heartbeat)
+    job = json_read(run_dir / "dashboard_job.json", {}) or {}
+    if str(job.get("dashboard_status") or "").lower() == "stopped":
+        return "stopped", "stopped", False
+
+    summary_status = str((summary or {}).get("run_status") or "").lower()
+    if summary_status == "passed":
+        return "passed", "pass", active
+    if summary_status == "failed":
+        return "failed", "fail", active
     if active:
-        status = "running"
-        code = "running"
-    return status, code, active
+        failed_dir = run_dir / "failed_attempts"
+        has_failures = failed_dir.is_dir() and any(failed_dir.iterdir())
+        return ("running with failures" if has_failures else "running"), "running", True
+
+    checkpoint = json_read(run_dir / "run_state_checkpoint.json", {}) or {}
+    if (
+        summary_status in {"running", "running with failures"}
+        or checkpoint.get("resume_stage")
+        or (run_dir / "execution_config.json").exists()
+    ):
+        return "stopped", "stopped", False
+    if summary_status:
+        return summary_status, "pending", False
+    return "incomplete", "pending", False
 
 
 def heartbeat_is_recent(heartbeat: dict | None) -> bool:
@@ -600,6 +631,8 @@ def build_run_summary(root: Path, run_dir: Path) -> dict:
     runtime_minutes, runtime_text = runtime_display(started_at, ended_at)
     resume_stage = str(checkpoint.get("resume_stage") or "")
     can_continue = bool(checkpoint and resume_stage and not active)
+    manually_stopped = str(job.get("dashboard_status") or "").lower() == "stopped"
+    can_stop = bool(status_code not in {"pass", "fail"} and not manually_stopped)
     if active:
         continue_reason = "This run is already active."
     elif not checkpoint:
@@ -647,6 +680,8 @@ def build_run_summary(root: Path, run_dir: Path) -> dict:
     )
     last_artifact = heartbeat.get("last_artifact") or (artifacts[0]["path"] if artifacts else "")
     last_reports = collect_stage_reports(run_dir, snapshot, summary, checkpoint, artifacts)
+    stdout_log = Path(str(job.get("stdout_log") or "dashboard_stdout.log")).name
+    console_output, console_truncated, console_bytes = tail_text_read(run_dir / stdout_log)
     return {
         "name": run_dir.name,
         "path": str(run_dir.relative_to(root)),
@@ -654,6 +689,9 @@ def build_run_summary(root: Path, run_dir: Path) -> dict:
         "status_code": status_code,
         "active": active,
         "can_continue": can_continue,
+        "can_stop": can_stop,
+        "manually_stopped": manually_stopped,
+        "stopped_at": job.get("stopped_at") or "",
         "continue_reason": continue_reason,
         "resume_stage": resume_stage,
         "checkpoint_phase": checkpoint.get("phase") or "",
@@ -680,6 +718,11 @@ def build_run_summary(root: Path, run_dir: Path) -> dict:
         "stages": build_stages(snapshot, summary, artifacts, checkpoint, execution, job),
         "last_reports": last_reports,
         "latest_report": infer_latest_report(run_dir, summary, snapshot, failed or artifacts),
+        "stdout_log": stdout_log,
+        "console_output": console_output,
+        "console_truncated": console_truncated,
+        "console_bytes": console_bytes,
+        "console_size_display": human_size(console_bytes),
         "recent_artifacts": artifacts,
         "failed_attempts": failed,
     }
@@ -782,11 +825,13 @@ def agent_process_options() -> dict:
 
 def launch_agent_process(command: list[str], root: Path, stdout_path: Path, env: dict[str, str]) -> subprocess.Popen:
     stdout_handle = stdout_path.open("ab")
+    process_env = dict(env)
+    process_env["PYTHONUNBUFFERED"] = "1"
     try:
         return subprocess.Popen(
             command,
             cwd=str(root),
-            env=env,
+            env=process_env,
             stdout=stdout_handle,
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
@@ -795,6 +840,132 @@ def launch_agent_process(command: list[str], root: Path, stdout_path: Path, env:
         )
     finally:
         stdout_handle.close()
+
+
+def process_matches_agent_run(run_dir: Path, pid: object) -> bool:
+    if not pid_is_running(pid):
+        return False
+    if os.name == "nt":
+        return True
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(int(pid)), "-o", "command="],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError, TypeError, ValueError):
+        return False
+    command = result.stdout.strip()
+    return bool(
+        result.returncode == 0
+        and "main.py" in command
+        and (str(run_dir) in command or "--artifact-dir" in command)
+    )
+
+
+def terminate_agent_process(run_dir: Path, pid: object) -> tuple[bool, str]:
+    if not process_matches_agent_run(run_dir, pid):
+        return False, "No matching live main.py process was found."
+    numeric_pid = int(pid)
+    try:
+        if os.name == "nt":
+            result = subprocess.run(
+                ["taskkill", "/PID", str(numeric_pid), "/T", "/F"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            if result.returncode != 0:
+                detail = (result.stderr or result.stdout).strip()
+                return False, detail or f"taskkill failed with exit code {result.returncode}."
+        else:
+            try:
+                os.killpg(numeric_pid, signal.SIGTERM)
+            except ProcessLookupError:
+                return False, "The main.py process had already exited."
+            except OSError:
+                os.kill(numeric_pid, signal.SIGTERM)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, str(exc)
+    return True, f"Stop signal sent to main.py PID {numeric_pid}."
+
+
+def stop_agent_run(root: Path, payload: dict) -> dict:
+    run_name = str(payload.get("dir") or "").strip()
+    run_dir = safe_run_dir(root, run_name)
+    job_path = run_dir / "dashboard_job.json"
+    heartbeat_path = run_dir / "dashboard_heartbeat.json"
+    job = json_read(job_path, {}) or {}
+    heartbeat = json_read(heartbeat_path, {}) or {}
+    now = datetime.now(timezone.utc).isoformat()
+
+    pids = []
+    for candidate in (heartbeat.get("process_id"), job.get("pid")):
+        if candidate not in {None, "", 0, "0"} and candidate not in pids:
+            pids.append(candidate)
+    signal_sent = False
+    stop_details = []
+    for pid in pids:
+        sent, detail = terminate_agent_process(run_dir, pid)
+        signal_sent = signal_sent or sent
+        if detail:
+            stop_details.append(detail)
+
+    stop_event = {
+        "requested_at": now,
+        "pids": pids,
+        "signal_sent": signal_sent,
+        "details": stop_details,
+    }
+    stop_history = list(job.get("stops", []))
+    stop_history.append(stop_event)
+    job.update(
+        {
+            "dashboard_status": "stopped",
+            "stopped_at": now,
+            "stop_requested_by": "dashboard_user",
+            "stops": stop_history,
+        }
+    )
+    job_path.write_text(json.dumps(job, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    heartbeat.update(
+        {
+            "updated_at": now,
+            "artifact_dir": str(run_dir),
+            "process_id": 0,
+            "dashboard_status": "stopped",
+            "last_artifact": "dashboard_job.json",
+            "last_artifact_path": str(job_path),
+            "last_artifact_bytes": job_path.stat().st_size,
+        }
+    )
+    heartbeat_path.write_text(
+        json.dumps(heartbeat, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    stdout_name = Path(str(job.get("stdout_log") or "dashboard_stdout.log")).name
+    try:
+        with (run_dir / stdout_name).open("a", encoding="utf-8") as handle:
+            detail_text = " ".join(stop_details) or "No live process was found; status was marked stopped."
+            handle.write(f"\n[DASHBOARD] Stop requested at {now}. {detail_text}\n")
+    except OSError:
+        pass
+
+    checkpoint = json_read(run_dir / "run_state_checkpoint.json", {}) or {}
+    return {
+        "artifact_dir": run_dir.name,
+        "status": "stopped",
+        "signal_sent": signal_sent,
+        "details": stop_details,
+        "can_continue": bool(checkpoint.get("resume_stage")),
+        "resume_stage": str(checkpoint.get("resume_stage") or ""),
+        "stopped_at": now,
+    }
 
 
 def start_agent_run(root: Path, payload: dict) -> dict:
@@ -877,6 +1048,7 @@ def start_agent_run(root: Path, payload: dict) -> dict:
 
     job = {
         "pid": process.pid,
+        "dashboard_status": "running",
         "created_at": datetime.now(timezone.utc).isoformat(),
         "started_at": datetime.now(timezone.utc).isoformat(),
         "artifact_dir": artifact_dir.name,
@@ -1000,6 +1172,9 @@ def continue_agent_run(root: Path, payload: dict) -> dict:
     job.update(
         {
             "pid": process.pid,
+            "dashboard_status": "running",
+            "stopped_at": "",
+            "stop_requested_by": "",
             "created_at": previous_job.get("created_at")
             or previous_job.get("started_at")
             or started_at,
@@ -1035,6 +1210,7 @@ def continue_agent_run(root: Path, payload: dict) -> dict:
                 "updated_at": started_at,
                 "artifact_dir": str(run_dir),
                 "process_id": process.pid,
+                "dashboard_status": "running",
                 "last_artifact": "dashboard_job.json",
                 "last_artifact_path": str(run_dir / "dashboard_job.json"),
                 "last_artifact_bytes": (run_dir / "dashboard_job.json").stat().st_size,
@@ -1106,6 +1282,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.handle_start()
             elif parsed.path == "/api/continue":
                 self.handle_continue()
+            elif parsed.path == "/api/stop":
+                self.handle_stop()
             else:
                 self.send_error(HTTPStatus.NOT_FOUND.value, "Not found")
         except (json.JSONDecodeError, ValueError) as exc:
@@ -1143,6 +1321,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
         result = continue_agent_run(self.root, payload)
         self.send_json(result, HTTPStatus.CREATED)
 
+    def handle_stop(self):
+        payload = self.read_json_body()
+        result = stop_agent_run(self.root, payload)
+        self.send_json(result, HTTPStatus.OK)
+
     def handle_runs(self):
         runs = []
         for run_dir in discover_runs(self.root):
@@ -1156,7 +1339,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     "status": status,
                     "status_code": status_code,
                     "active": active,
-                    "updated_at": heartbeat.get("updated_at") or iso_from_mtime(run_dir),
+                    "updated_at": (
+                        (json_read(run_dir / "dashboard_job.json", {}) or {}).get("stopped_at")
+                        or heartbeat.get("updated_at")
+                        or iso_from_mtime(run_dir)
+                    ),
                 }
             )
         self.send_json({"runs": runs})

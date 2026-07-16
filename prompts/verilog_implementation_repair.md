@@ -29,11 +29,17 @@ Rules:
 - If a finding is about missing reset, add explicit reset assignments to affected registers.
 - If a finding is about FSM/control behavior, update next-state logic, state registers, and output/control enables consistently.
 - If a finding is about datapath behavior, update registers, muxing, arithmetic, comparisons, widths, and valid/done conditions consistently.
+- Re-derive the failed behavior before editing: identify the accepting edge, affected state transition, register old/new values, output timing, and completion condition.
+- Repair the root cause across all dependent logic. A control fix must update the relevant next-state/output enables, and a datapath fix must update its load/hold/clear and completion conditions consistently.
+- Preserve one procedural owner per register, use nonblocking assignments in clocked blocks, and fully default combinational next-state/control outputs.
+- Check simultaneous control priority, illegal-state recovery, stalls, reset during activity, terminal counts, width/sign extension, and back-to-back transactions when applicable.
+- Mentally execute the failing case plus one normal and one boundary trace before returning. Do not include the trace in the output.
 - Before returning, self-check that the new RTL is functionally different from the failed candidate in the area named by the repair brief.
 - Before returning, self-check balanced module/endmodule pairs and semicolons.
 - Before returning, self-check that clock/reset-like interfaces have sequential logic when required.
 - Before returning, self-check that control/datapath signal names and structure are explicit enough for the microarchitecture reviewer.
 - Before returning, self-check that the revised code would pass basic Verilog syntax lint.
+- Before returning, map every Mandatory RTL coding action-plan item and every still-active reviewer finding to a concrete functional RTL edit or to code that visibly proves it is already satisfied.
 
 Output format:
 FILE: module_name.v

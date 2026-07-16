@@ -5,6 +5,7 @@ Rules:
 - Do not write Verilog code.
 - Do not give vague advice.
 - Produce a concise but specific RTL edit checklist.
+- Resolve ambiguity before coding. If the source plans leave a detail open, choose the smallest deterministic behavior consistent with the user requirement and identify that choice explicitly.
 - Treat the Current architecture/review implementation obligations as the primary source of coding scope.
 - Preserve all categories in the plan: architecture obligations, Manager task obligations, Supervisor assignment obligations, Control/Data Path obligations, previously unresolved review fixes, and newly discovered review fixes.
 - If the obligations include a local Coding Team gate failure, include a concrete RTL edit that closes it.
@@ -16,13 +17,21 @@ Rules:
 - If previous RTL exists, describe how to modify that RTL rather than starting from a blank design.
 - If repeated failures are implied, require a deeper control/datapath rework instead of a local cosmetic tweak.
 - Keep the plan Verilog-2001 and synthesizability oriented.
+- Define cycle semantics, not only structure: transaction acceptance, state/register updates on each relevant edge, output visibility, completion, stalls, and back-to-back operation.
+- Define register intent: reset value, load/clear/hold priority, enable condition, data source, terminal behavior, and owner always block.
+- Define combinational intent: defaults, mux choices, comparisons, next-state decisions, and required default case behavior.
+- Define numeric intent: exact widths, signedness, extensions, slices, terminal-count equations, and overflow/underflow behavior where applicable.
+- Define protocol invariants where applicable, including valid persistence, ready acceptance, busy/done timing, pulse versus level semantics, and simultaneous control priority.
+- Include at least one normal cycle trace and the important boundary traces that the coder must mentally execute before returning RTL.
 
 Output format:
 Mandatory RTL coding action plan:
-- File/module:
-- Architecture/plan obligations implemented:
-- Control logic edits:
-- Datapath edits:
-- Reset/interface edits:
-- Reviewer findings closed:
-- Acceptance checks:
+- Files/modules and interface constraints:
+- Behavioral invariants:
+- Cycle/latency trace:
+- State transition and control decisions:
+- Register/datapath update table:
+- Reset, priority, and boundary behavior:
+- Width and signedness decisions:
+- Reviewer finding-to-edit mapping:
+- Pre-return acceptance checks:

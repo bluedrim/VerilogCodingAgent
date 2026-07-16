@@ -338,6 +338,37 @@ def _coding_revision_mode(state: AgentState) -> str:
     return f"fresh implementation attempt {attempt}"
 
 
+def _task_contract_field(task: dict, *names: str) -> str:
+    for name in names:
+        value = task.get(name)
+        if value not in (None, "", [], {}):
+            if isinstance(value, (dict, list)):
+                return json.dumps(value, ensure_ascii=False, sort_keys=True)
+            return str(value).strip()
+    return "(not explicitly specified)"
+
+
+def _render_rtl_quality_contract(state: AgentState, task: dict, max_chars: int) -> str:
+    lines = [
+        "RTL implementation quality contract:",
+        "- Functional behavior and cycle timing must follow the task and reviewed plans exactly; do not invent ports, protocols, or latency.",
+        "- Every sequential register must have intentional reset and hold/update behavior. Use nonblocking assignments in clocked blocks.",
+        "- Every combinational output/next-state/control signal must be assigned on all paths, with defaults and a default case where applicable.",
+        "- Keep control and datapath responsibilities explicit: FSM/handshake/enables select when work happens; datapath registers/arithmetic define what data changes.",
+        "- Derive terminal counts, comparisons, slices, extensions, and arithmetic widths explicitly. Avoid silent truncation and signed/unsigned ambiguity.",
+        "- For ready/valid, start/done, request/acknowledge, or similar protocols, define acceptance, persistence, busy behavior, and back-to-back transactions when applicable.",
+        "- Handle boundary conditions named by the task, including reset during activity, minimum/maximum values, overflow policy, zero-length work, and simultaneous controls when applicable.",
+        "- Use synthesizable Verilog-2001 only and return complete files with stable interfaces unless a reviewed requirement explicitly changes them.",
+        "",
+        f"Required behavior: {_task_contract_field(task, 'behavior', 'goal', 'description')}",
+        f"Cycle/latency expectations: {_task_contract_field(task, 'timing', 'latency', 'cycle_behavior')}",
+        f"Reset/clocking expectations: {_task_contract_field(task, 'reset_clocking', 'reset', 'clocking')}",
+        f"Edge cases: {_task_contract_field(task, 'edge_cases', 'corner_cases')}",
+        f"Acceptance criteria: {_task_contract_field(task, 'acceptance_criteria', 'acceptance', 'deliverable')}",
+    ]
+    return clip_text("\n".join(lines), max_chars)
+
+
 def _coding_repair_intensity(state: AgentState) -> str:
     attempts = max(
         state.get("coding_retry_count", 0),
@@ -437,6 +468,8 @@ CODING_PROMPT_WEIGHTS = {
     "repair_contract": 5,
     "feedback": 1,
     "coding_action_plan": 8,
+    "quality_contract": 8,
+    "quality_context": 5,
     "gate_report": 8,
     "parser_error": 3,
 }
@@ -472,9 +505,23 @@ def _budget_coding_prompt_payload(
             "(raw feedback consolidated into the coding repair backlog, action plan, "
             "and repair contract above)"
         )
+        before_sizes = {key: len(value) for key, value in rendered.items()}
 
     reserve = min(max(256, context_limit // 10), max(context_limit // 3, 1))
     weighted_budget = max(context_limit - reserve, 1)
+    total_before = sum(before_sizes.values())
+    if total_before <= weighted_budget:
+        return rendered, {
+            "context_limit": context_limit,
+            "reserved_for_prompt_labels_and_system_message": reserve,
+            "weighted_payload_budget": weighted_budget,
+            "truncation_required": False,
+            "total_before": total_before,
+            "total_after": total_before,
+            "before_sizes": before_sizes,
+            "after_sizes": before_sizes,
+        }
+
     active_weights = {
         key: CODING_PROMPT_WEIGHTS.get(key, 1)
         for key in rendered
@@ -494,6 +541,37 @@ def _budget_coding_prompt_payload(
     for key in remainder_order[:remaining]:
         allocations[key] += 1
 
+    # Reuse allocations left by short fields so large RTL/code fields receive the
+    # full available context instead of being truncated while budget sits idle.
+    effective_allocations = {
+        key: min(before_sizes[key], allocations[key]) for key in active_weights
+    }
+    unused = weighted_budget - sum(effective_allocations.values())
+    while unused > 0:
+        needy = [
+            key
+            for key in active_weights
+            if effective_allocations[key] < before_sizes[key]
+        ]
+        if not needy:
+            break
+        needy_weight = sum(active_weights[key] for key in needy) or len(needy)
+        granted = 0
+        for key in needy:
+            need = before_sizes[key] - effective_allocations[key]
+            share = max(1, unused * active_weights[key] // needy_weight)
+            grant = min(need, share, unused - granted)
+            if grant <= 0:
+                continue
+            effective_allocations[key] += grant
+            granted += grant
+            if granted >= unused:
+                break
+        if granted <= 0:
+            break
+        unused -= granted
+    allocations = effective_allocations
+
     for key in active_weights:
         rendered[key] = clip_exact(rendered[key], allocations[key])
 
@@ -502,6 +580,8 @@ def _budget_coding_prompt_payload(
         "context_limit": context_limit,
         "reserved_for_prompt_labels_and_system_message": reserve,
         "weighted_payload_budget": weighted_budget,
+        "truncation_required": True,
+        "unused_payload_budget": weighted_budget - sum(after_sizes.values()),
         "unweighted_keys": sorted(key for key in rendered if key not in CODING_PROMPT_WEIGHTS),
         "total_before": sum(before_sizes.values()),
         "total_after": sum(after_sizes.values()),
@@ -514,23 +594,26 @@ def _budget_coding_prompt_payload(
 def _render_deterministic_coding_action_plan(state: AgentState, max_chars: int) -> str:
     task = current_manager_task(state)
     entries = _coding_feedback_entries(state)
-    repair_backlog = render_coding_repair_backlog(state, max_chars)
+    summary_limit = max(300, max_chars // 8)
     lines = [
         "Mandatory RTL coding action plan:",
-        "- Produce complete Verilog-2001 FILE blocks only.",
-        "- Implement the current Manager task and Supervisor assignment directly in RTL.",
-        "- Implement the current Architecture contract and Control/Data Path plan directly in RTL.",
-        "- Close every reviewer-driven change request in the same RTL revision.",
-        "- Keep control logic and datapath logic explicit and synthesizable.",
-        "- Use this plan as a code-edit checklist before returning files.",
+        "- Translate each obligation below into an observable port, register, state transition, control assignment, datapath operation, or acceptance check.",
+        "- Resolve interface, cycle timing, reset, state/control, datapath, width/sign, protocol, and boundary behavior before writing output.",
+        "- Produce complete synthesizable Verilog-2001 FILE blocks only after checking every plan item.",
         "",
         f"Task: {task.get('id', 'task')} - {task.get('title', '')}",
         "",
-        "Current architecture/control-data path implementation obligations:",
-        _render_implementation_obligation_packet(state, task, max_chars // 2),
+        "Obligation digest:",
+        f"- Architecture: {clip_text(state.get('architecture_contract') or '(none)', summary_limit)}",
+        f"- Supervisor: {clip_text(state.get('supervisor_plan') or '(none)', summary_limit)}",
+        f"- Control/Data Path: {clip_text(state.get('control_datapath_plan') or '(none)', summary_limit)}",
         "",
-        "Cumulative repair backlog digest:",
-        repair_backlog,
+        "Required implementation decisions:",
+        "- Interface and timing: preserve required ports/parameters and define transaction acceptance, latency, completion, and back-to-back behavior.",
+        "- Control logic: define current/next state, legal transitions, priority, enables, load/clear, busy, valid/ready, done, and error behavior as applicable.",
+        "- Datapath: define every storage element, source mux, arithmetic/comparison operation, update condition, output source, and exact width/sign behavior.",
+        "- Reset and boundaries: define every register reset value, recovery to idle, terminal-count behavior, simultaneous controls, and required overflow/underflow policy.",
+        "- Acceptance: mentally trace reset, one normal transaction, boundary transactions, stalls, and consecutive transactions before returning code.",
     ]
     if state.get("candidate_files"):
         lines.extend(["", "Previous candidate handling:"])
@@ -568,7 +651,7 @@ def _render_deterministic_coding_action_plan(state: AgentState, max_chars: int) 
                 f"{idx}. stage={entry.get('stage', 'unknown')} "
                 f"task={entry.get('task_id', 'global')} focus={tags}"
             )
-            lines.append(f"   RTL edit required: {report}")
+            lines.append(f"   RTL edit required: {clip_text(report, summary_limit)}")
             lines.append(
                 "   Acceptance: the returned Verilog must make this exact report obsolete."
             )
@@ -583,15 +666,6 @@ def _build_coding_action_plan(
     section_limit: int,
 ) -> str:
     deterministic_plan = _render_deterministic_coding_action_plan(state, section_limit)
-    if _is_anti_stall_mode(state) or not (
-        _coding_feedback_entries(state) or state.get("candidate_files")
-    ):
-        write_text_artifact(
-            f"logs/{task_id}_coding_action_plan_attempt_{state.get('coding_retry_count', 0) + 1}.md",
-            deterministic_plan,
-        )
-        return deterministic_plan
-
     system_prompt = load_prompt("verilog_coding_action_plan.md")
     human_template = """
 Original user requirement:
@@ -605,6 +679,9 @@ Supervisor detailed assignment:
 
 Control/Data Path plan:
 {control_datapath_plan}
+
+RTL implementation quality contract:
+{quality_contract}
 
 Current architecture/review implementation obligations:
 {implementation_obligations}
@@ -642,6 +719,7 @@ Deterministic minimum action plan:
             "task": render_manager_task(task),
             "supervisor_plan": prompt_payload["supervisor_plan"],
             "control_datapath_plan": prompt_payload["control_datapath_plan"],
+            "quality_contract": prompt_payload["quality_contract"],
             "implementation_obligations": prompt_payload["implementation_obligations"],
             "previous_candidate_rtl": clip_text(
                 prompt_payload["previous_candidate_rtl"], section_limit
@@ -667,14 +745,28 @@ Deterministic minimum action plan:
             payload,
         )
         response = (planner_prompt | llm).invoke(payload)
-        plan = str(response.content or "").strip()
+        planner_plan = str(response.content or "").strip()
     except Exception as exc:
-        plan = f"{deterministic_plan}\n\nAction planner failed; use deterministic plan. Error: {exc}"
+        planner_plan = ""
+        planner_error = str(exc)
+    else:
+        planner_error = ""
 
-    if len(plan) < 120:
+    if len(planner_plan) < 160:
+        reason = (
+            f"Action planner unavailable ({planner_error})."
+            if planner_error
+            else "Action planner returned too little detail."
+        )
+        plan = f"{deterministic_plan}\n\n{reason} Deterministic plan is authoritative."
+    else:
+        planner_limit = max(400, section_limit * 2 // 3)
+        guardrail_limit = max(300, section_limit - planner_limit)
         plan = (
-            deterministic_plan
-            + "\n\nAction planner returned too little detail; deterministic plan is authoritative."
+            "Planner-derived RTL edit plan:\n"
+            + clip_text(planner_plan, planner_limit)
+            + "\n\nDeterministic implementation guardrails:\n"
+            + clip_text(deterministic_plan, guardrail_limit)
         )
 
     plan = clip_text(plan, section_limit)
@@ -1042,6 +1134,130 @@ Current RTL candidate:
     return False, "Coding closure audit failed:\n" + final_report
 
 
+def _coding_quality_audit(
+    state: AgentState,
+    task: dict,
+    task_id: str,
+    files: list[dict[str, str]],
+    prompt_payload: dict,
+    section_limit: int,
+    phase: str,
+) -> tuple[bool, str]:
+    attempt = state.get("coding_retry_count", 0) + 1
+    static_result = static_microarchitecture_review(files)
+    lint_result = run_syntax_lint(
+        merge_files(state.get("final_files", []), files),
+        False,
+        state.get("lint_timeout_seconds", 30),
+    )
+    quality_context = (
+        f"Static microarchitecture result:\n{static_result.get('report', '')}\n\n"
+        f"Syntax lint result:\n{lint_result.get('report', '')}"
+    )
+    system_prompt = load_prompt("verilog_coding_quality_review.md")
+    human_template = """
+Original user requirement:
+{user_request}
+
+Current Manager task:
+{task}
+
+Architecture contract:
+{architecture_contract}
+
+Supervisor detailed assignment:
+{supervisor_plan}
+
+Control/Data Path plan:
+{control_datapath_plan}
+
+RTL implementation quality contract:
+{quality_contract}
+
+Mandatory RTL coding action plan:
+{coding_action_plan}
+
+Current architecture/review implementation obligations:
+{implementation_obligations}
+
+Static and lint context:
+{quality_context}
+
+RTL candidate to audit:
+{candidate_rtl}
+"""
+    candidate_limit = max(section_limit, state.get("max_context_chars", 120_000) // 2)
+    payload = {
+        "user_request": prompt_payload["user_request"],
+        "task": render_manager_task(task),
+        "architecture_contract": prompt_payload["architecture_contract"],
+        "supervisor_plan": prompt_payload["supervisor_plan"],
+        "control_datapath_plan": prompt_payload["control_datapath_plan"],
+        "quality_contract": prompt_payload["quality_contract"],
+        "coding_action_plan": prompt_payload["coding_action_plan"],
+        "implementation_obligations": prompt_payload["implementation_obligations"],
+        "quality_context": quality_context,
+        "candidate_rtl": render_files_for_prompt(files, candidate_limit),
+    }
+    payload, budget_report = _budget_coding_prompt_payload(
+        payload, state.get("max_context_chars", 120_000)
+    )
+    write_json_artifact(
+        f"logs/{task_id}_coding_quality_audit_prompt_sizes_{phase}_attempt_{attempt}.json",
+        budget_report,
+    )
+    log_agent_prompt(
+        "verilog_coding_quality_review",
+        f"{task_id}_{attempt}_{phase}",
+        system_prompt,
+        human_template,
+        payload,
+    )
+    prompt = ChatPromptTemplate.from_messages(
+        [("system", system_prompt), ("human", human_template)]
+    )
+    try:
+        response = (prompt | llm).invoke(payload)
+    except Exception as exc:
+        write_text_artifact(
+            f"logs/{task_id}_coding_quality_audit_{phase}_attempt_{attempt}.md",
+            f"Coding quality audit skipped after runtime error: {exc}",
+        )
+        return True, ""
+
+    passed, report, decision_details = parse_review_result_with_details(
+        response.content,
+        "Coding quality audit output was not valid JSON.",
+    )
+    write_text_artifact(
+        f"logs/{task_id}_coding_quality_audit_raw_{phase}_attempt_{attempt}.txt",
+        response.content,
+    )
+    write_json_artifact(
+        f"logs/{task_id}_coding_quality_audit_decision_{phase}_attempt_{attempt}.json",
+        decision_details,
+    )
+    if (
+        decision_details.get("source") == "text"
+        and decision_details.get("fallback_text_verdict") is None
+    ):
+        write_text_artifact(
+            f"logs/{task_id}_coding_quality_audit_{phase}_attempt_{attempt}.md",
+            "Coding quality audit skipped because the auditor returned no parseable verdict.\n\n"
+            + str(response.content),
+        )
+        return True, ""
+
+    final_report = report or ("PASS" if passed else "RTL has an objective implementation defect.")
+    write_text_artifact(
+        f"logs/{task_id}_coding_quality_audit_{phase}_attempt_{attempt}.md",
+        final_report,
+    )
+    if passed:
+        return True, ""
+    return False, "Coding quality audit failed:\n" + final_report
+
+
 def _coding_repair_scope_audit(state: AgentState, files: list[dict[str, str]]) -> dict:
     previous_files = state.get("candidate_files", [])
     previous_hashes = _functional_file_hashes(previous_files)
@@ -1163,6 +1379,9 @@ Supervisor detailed assignment:
 Control/Data Path plan:
 {control_datapath_plan}
 
+RTL implementation quality contract:
+{quality_contract}
+
 Current architecture/review implementation obligations:
 {implementation_obligations}
 
@@ -1212,6 +1431,7 @@ Raw reviewer feedback:
         "manager_handoff": prompt_payload["manager_handoff"],
         "supervisor_plan": prompt_payload["supervisor_plan"],
         "control_datapath_plan": prompt_payload["control_datapath_plan"],
+        "quality_contract": prompt_payload["quality_contract"],
         "implementation_obligations": prompt_payload["implementation_obligations"],
         "repair_intensity": prompt_payload["repair_intensity"],
         "coding_action_plan": coding_action_plan,
@@ -1309,6 +1529,17 @@ def _repair_candidate_against_review_gate(
         )
         if closure_report:
             gate_report = "\n\n".join(item for item in (gate_report, closure_report) if item)
+        _quality_passed, quality_report = _coding_quality_audit(
+            state,
+            task,
+            task_id,
+            files,
+            prompt_payload,
+            section_limit,
+            "initial",
+        )
+        if quality_report:
+            gate_report = "\n\n".join(item for item in (gate_report, quality_report) if item)
     if not gate_report:
         return files, messages, ""
 
@@ -1361,6 +1592,7 @@ def _repair_candidate_against_review_gate(
             + "\n\nAutomated review-gate repair was attempted but did not make a broad enough functional RTL change.",
         )
 
+    post_repair_reports = []
     _closure_passed, second_closure_report = _coding_closure_audit(
         state,
         task,
@@ -1371,11 +1603,24 @@ def _repair_candidate_against_review_gate(
         "repaired",
     )
     if second_closure_report:
+        post_repair_reports.append(second_closure_report)
+    _quality_passed, second_quality_report = _coding_quality_audit(
+        state,
+        task,
+        task_id,
+        repaired_files,
+        prompt_payload,
+        section_limit,
+        "repaired",
+    )
+    if second_quality_report:
+        post_repair_reports.append(second_quality_report)
+    if post_repair_reports:
         return (
             repaired_files,
             next_messages,
-            second_closure_report
-            + "\n\nAutomated review-gate repair was attempted but did not close the review backlog.",
+            "\n\n".join(post_repair_reports)
+            + "\n\nAutomated review-gate repair was attempted but objective RTL issues remain.",
         )
 
     write_json_artifact(
@@ -1499,6 +1744,9 @@ Supervisor detailed assignment:
 Control/Data Path plan:
 {control_datapath_plan}
 
+RTL implementation quality contract:
+{quality_contract}
+
 Current architecture/review implementation obligations:
 {implementation_obligations}
 
@@ -1554,6 +1802,9 @@ Supervisor detailed assignment:
 Control/Data Path plan:
 {control_datapath_plan}
 
+RTL implementation quality contract:
+{quality_contract}
+
 Current architecture/review implementation obligations:
 {implementation_obligations}
 
@@ -1605,6 +1856,7 @@ Review-to-code repair contract:
         "control_datapath_plan": clip_text(
             state.get("control_datapath_plan") or "(none)", section_limit
         ),
+        "quality_contract": _render_rtl_quality_contract(state, task, section_limit),
         "implementation_obligations": _render_implementation_obligation_packet(
             state, task, section_limit
         ),

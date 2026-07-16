@@ -62,6 +62,12 @@
     }
     button { cursor: pointer; }
     button:hover { border-color: #9fb0c3; }
+    button.danger {
+      color: var(--bad);
+      border-color: #e1aaa6;
+      background: #fff8f7;
+    }
+    button.danger:hover { background: var(--soft-bad); }
     .toolbar {
       display: flex;
       align-items: center;
@@ -301,6 +307,26 @@
       min-height: 260px;
       max-height: 520px;
     }
+    .panel-heading {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 10px;
+    }
+    .panel-heading h2 {
+      margin: 0;
+    }
+    .console-pane {
+      height: 420px;
+      max-height: 520px;
+      white-space: pre;
+      word-break: normal;
+      color: #dce7f2;
+      background: #111820;
+      border-color: #2a3948;
+      scrollbar-color: #63788d #111820;
+    }
     .report-grid {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -397,6 +423,7 @@
             <div class="launch-actions">
               <button id="startBtn" type="submit">Start new task</button>
               <button id="continueBtn" type="button" disabled>Continue task</button>
+              <button id="stopBtn" class="danger" type="button" disabled>Stop task</button>
               <span id="startStatus" class="status-line">Ready.</span>
             </div>
           </div>
@@ -413,6 +440,13 @@
         <h2>Latest Report</h2>
         <pre id="latestReport">No report yet.</pre>
       </div>
+    </section>
+    <section class="panel" style="margin-top:12px;">
+      <div class="panel-heading">
+        <h2>main.py Console Output</h2>
+        <span id="consoleStatus" class="pill info">No log</span>
+      </div>
+      <pre id="consoleOutput" class="console-pane">Start or select a run to view main.py print output.</pre>
     </section>
     <section class="panel" style="margin-top:12px;">
       <h2>Stage Reports</h2>
@@ -442,13 +476,15 @@
     </section>
   </main>
   <script>
-    const state = { runs: [], selected: "", timer: null, lastRun: null };
+    const state = { runs: [], selected: "", timer: null, lastRun: null, consoleRun: "" };
     const runSelect = document.getElementById("runSelect");
     const subtitle = document.getElementById("subtitle");
     const metrics = document.getElementById("metrics");
     const pipeline = document.getElementById("pipeline");
     const reports = document.getElementById("reports");
     const latestReport = document.getElementById("latestReport");
+    const consoleOutput = document.getElementById("consoleOutput");
+    const consoleStatus = document.getElementById("consoleStatus");
     const artifactList = document.getElementById("artifactList");
     const failedList = document.getElementById("failedList");
     const filePreview = document.getElementById("filePreview");
@@ -459,9 +495,11 @@
     const startBtn = document.getElementById("startBtn");
     const startStatus = document.getElementById("startStatus");
     const continueBtn = document.getElementById("continueBtn");
+    const stopBtn = document.getElementById("stopBtn");
 
     document.getElementById("refreshBtn").addEventListener("click", () => refreshAll(true));
     continueBtn.addEventListener("click", continueRun);
+    stopBtn.addEventListener("click", stopRun);
     runSelect.addEventListener("change", () => {
       state.selected = runSelect.value;
       refreshRun();
@@ -471,7 +509,7 @@
 
     function clsStatus(status) {
       if (status === "pass") return "good";
-      if (status === "forced" || status === "running") return "warn";
+      if (status === "forced" || status === "running" || status === "stopped") return "warn";
       if (status === "fail") return "bad";
       return "info";
     }
@@ -559,6 +597,30 @@
       }
     }
 
+    async function stopRun() {
+      if (!state.selected || !state.lastRun || !state.lastRun.can_stop) return;
+      const activeText = state.lastRun.active
+        ? "The running main.py process will be terminated."
+        : "No live process was detected. The selected project will be marked stopped.";
+      if (!window.confirm(`Stop ${state.selected}?\n\n${activeText}\nIts checkpoint will remain available for Continue task.`)) {
+        return;
+      }
+      stopBtn.disabled = true;
+      startStatus.textContent = `Stopping ${state.selected}...`;
+      try {
+        const result = await postJson("/api/stop", { dir: state.selected });
+        const detail = result.signal_sent ? "Process stop signal sent." : "Project marked stopped.";
+        startStatus.textContent = `${detail}${result.resume_stage ? ` Continue is available from ${result.resume_stage}.` : ""}`;
+        await refreshAll(false);
+      } catch (err) {
+        startStatus.textContent = `Stop failed: ${err.message}`;
+      } finally {
+        if (state.lastRun) {
+          stopBtn.disabled = !state.lastRun.can_stop;
+        }
+      }
+    }
+
     async function refreshAll(forceLatest = false) {
       try {
         const data = await getJson("/api/runs");
@@ -613,10 +675,16 @@
       artifactList.innerHTML = '<div class="empty">No artifacts.</div>';
       failedList.innerHTML = '<div class="empty">No failed attempts.</div>';
       latestReport.textContent = "No run selected.";
+      consoleOutput.textContent = "Start or select a run to view main.py print output.";
+      consoleStatus.className = "pill info";
+      consoleStatus.textContent = "No log";
+      state.consoleRun = "";
       filePreview.textContent = "Select a recent artifact to preview it.";
       failedPreview.textContent = "Select a failed attempt to preview it.";
       continueBtn.disabled = true;
       continueBtn.title = "Select a resumable run.";
+      stopBtn.disabled = true;
+      stopBtn.title = "Select a run.";
     }
 
     function renderRun(run) {
@@ -627,6 +695,10 @@
       continueBtn.title = run.active
         ? "This run is already active."
         : (run.can_continue ? `Continue from ${run.resume_stage}` : (run.continue_reason || "No pending work."));
+      stopBtn.disabled = !run.can_stop;
+      stopBtn.title = run.manually_stopped
+        ? `Stopped at ${run.stopped_at || "unknown time"}.`
+        : (run.active ? "Terminate the selected main.py run and mark it stopped." : "Mark this inactive project as stopped.");
       const statusClass = clsStatus(run.status_code || "pending");
       const runStatusSub = `${run.run_id || run.name} | runtime ${run.runtime_display || "unknown"}`;
       metrics.innerHTML = [
@@ -639,9 +711,29 @@
       pipeline.innerHTML = (run.stages || []).map(stageHtml).join("");
       renderReports(run);
       latestReport.textContent = run.latest_report || "No report yet.";
+      renderConsole(run);
       artifactList.innerHTML = tableFor(run.recent_artifacts || [], "artifact");
       failedList.innerHTML = tableFor(run.failed_attempts || [], "failed");
       bindFileLinks();
+    }
+
+    function renderConsole(run) {
+      const switchingRun = state.consoleRun !== run.name;
+      const distanceFromBottom = consoleOutput.scrollHeight - consoleOutput.scrollTop - consoleOutput.clientHeight;
+      const shouldFollow = switchingRun || distanceFromBottom < 48;
+      const output = run.console_output || "Waiting for main.py output...";
+      if (consoleOutput.textContent !== output) {
+        consoleOutput.textContent = output;
+      }
+      state.consoleRun = run.name;
+      consoleStatus.className = `pill ${run.active ? "warn" : "info"}`;
+      const tailText = run.console_truncated ? " | latest 500 KB" : "";
+      consoleStatus.textContent = `${run.active ? "Live" : "Stopped"} | ${run.console_size_display || "0 B"}${tailText}`;
+      if (shouldFollow) {
+        requestAnimationFrame(() => {
+          consoleOutput.scrollTop = consoleOutput.scrollHeight;
+        });
+      }
     }
 
     function metric(label, value, sub) {

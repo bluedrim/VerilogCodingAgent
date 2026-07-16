@@ -21,6 +21,9 @@ Rules:
 - If the failure says the RTL was unchanged, rework the affected control logic, datapath logic, reset behavior, state machine, handshake, counter, width handling, or interface behavior.
 - If the failure is syntax/lint related, fix the exact syntax or Verilog-2001 compliance issue and keep the design synthesizable.
 - If the failure is about static microarchitecture review, make control/datapath structure explicit in real RTL: registers, next-state/control decisions, datapath registers, enables, and done/valid behavior.
+- If the failure is from the coding quality audit, implement every `required_fix` and use its `acceptance` condition as the exact post-repair self-check.
+- Re-run the relevant cycle mentally after repair, including the accepting edge, register updates, output timing, completion, and the named boundary condition.
+- Keep one procedural owner per register, complete combinational defaults, deterministic priority, exact widths/signing, and consistent control/datapath updates.
 - Before returning, self-check that the revised candidate would no longer trigger the Local review-gate failure.
 
 Output format:
