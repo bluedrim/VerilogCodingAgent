@@ -41,16 +41,10 @@ def control_datapath_planner_agent(state: AgentState):
     )
     system_prompt = load_prompt("control_datapath_planner.md")
     human_template = """
-Original user requirement:
-{user_request}
-
 Architecture contract:
 {architecture_contract}
 
-Current Manager task:
-{task}
-
-Manager handoff packet:
+Current Manager task packet:
 {manager_handoff}
 
 Supervisor detailed assignment:
@@ -86,9 +80,7 @@ Control/Data Path reviewer revision checklist:
         ]
     )
     payload = {
-        "user_request": state["user_request"],
         "architecture_contract": state.get("architecture_contract") or "(none)",
-        "task": render_manager_task(task),
         "manager_handoff": current_manager_handoff(state),
         "supervisor_plan": state["supervisor_plan"],
         "rtl_context": clip_text(
@@ -155,7 +147,7 @@ def control_datapath_review_agent(state: AgentState):
     task = current_manager_task(state)
     task_id = sanitize_artifact_name(task.get("id"), "task")
     print(f"---CONTROL/DATAPATH REVIEW: Checking micro-architecture plan for {task['id']}---")
-    system_prompt = load_prompt("control_datapath_review.md")
+    system_prompt = load_reviewer_prompt("control_datapath_review.md")
     human_template = """
 Original user requirement:
 {user_request}
@@ -253,6 +245,13 @@ Control/Data Path plan:
             "control_datapath_review",
             review_report,
             task_id,
+        ),
+        "forced_forward_debt": (
+            append_forced_forward_debt(
+                state, "control_datapath_review", report or review_report, task_id
+            )
+            if force_forward
+            else state.get("forced_forward_debt", [])
         ),
         "messages": [response],
     }

@@ -131,20 +131,11 @@ def supervisor_agent(state: AgentState):
     repair_contract = _render_supervisor_repair_contract(state, task, revision_checklist)
     system_prompt = load_prompt("supervisor.md")
     human_template = """
-Original user requirement:
-{user_request}
-
-Full Manager plan:
-{manager_plan}
-
-Manager handoff packet:
+Current Manager task packet:
 {manager_handoff}
 
 Architecture contract:
 {architecture_contract}
-
-Current Manager task:
-{task}
 
 Supervisor revision mode:
 {revision_mode}
@@ -179,11 +170,8 @@ Supervisor repair contract:
         ]
     )
     payload = {
-        "user_request": state["user_request"],
-        "manager_plan": render_manager_plan(state["manager_plan"]),
         "manager_handoff": current_manager_handoff(state),
         "architecture_contract": state.get("architecture_contract") or "(none)",
-        "task": render_manager_task(task),
         "rtl_context": clip_text(
             state.get("rtl_context") or "(none)",
             state.get("max_context_chars", 120_000),
@@ -288,7 +276,7 @@ def supervisor_review_agent(state: AgentState):
     task = current_manager_task(state)
     task_id = sanitize_artifact_name(task.get("id"), "task")
     print(f"---SUPERVISOR REVIEW: Checking task packet for {task['id']}---")
-    system_prompt = load_prompt("supervisor_review.md")
+    system_prompt = load_reviewer_prompt("supervisor_review.md")
     human_template = """
 Original user requirement:
 {user_request}
@@ -381,6 +369,11 @@ Supervisor task packet:
             "supervisor_review",
             review_report,
             task_id,
+        ),
+        "forced_forward_debt": (
+            append_forced_forward_debt(state, "supervisor_review", report or review_report, task_id)
+            if force_forward
+            else state.get("forced_forward_debt", [])
         ),
         "messages": [response],
     }

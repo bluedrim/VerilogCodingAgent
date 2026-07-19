@@ -119,6 +119,19 @@ class CodingPlanningTests(unittest.TestCase):
             report["weighted_payload_budget"],
         )
 
+    def test_prompt_budget_retains_tail_of_large_rtl(self):
+        payload = {
+            "user_request": "counter",
+            "candidate_rtl": "module counter;\n" + ("wire x;\n" * 500) + "endmodule\n",
+        }
+
+        rendered, report = coding_team._budget_coding_prompt_payload(payload, 1000)
+
+        self.assertTrue(report["truncation_required"])
+        self.assertIn("module counter", rendered["candidate_rtl"])
+        self.assertTrue(rendered["candidate_rtl"].endswith("endmodule\n"))
+        self.assertIn("TRUNCATED MIDDLE", rendered["candidate_rtl"])
+
 
 class CodingQualityLoopTests(unittest.TestCase):
     def setUp(self):

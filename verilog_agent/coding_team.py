@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 
@@ -16,6 +15,10 @@ def _with_runtime(fn):
     return wrapped
 
 
+def _load_coding_prompt(filename: str) -> str:
+    return f"{load_prompt('coding_runtime_contract.md')}\n\n{load_prompt(filename)}"
+
+
 def _strip_hdl_comments(content: str) -> str:
     runtime_strip = globals().get("strip_hdl_comments")
     if callable(runtime_strip):
@@ -23,37 +26,12 @@ def _strip_hdl_comments(content: str) -> str:
     return re.sub(r"//.*?$|/\*.*?\*/", "", content, flags=re.S | re.M)
 
 
-IMPLEMENTATION_REVIEW_STAGES = (
-    "supervisor_review",
-    "control_datapath_review",
-    "microarchitecture_review",
-    "verification",
-    "verification_lint",
-    "coding_format",
-    "coding_gate_internal",
-    "coding_unchanged",
-    "coding_preflight",
-)
-
-
 LOCAL_CODING_GATE_STAGES = {
     "coding",
     "coding_repair_contract",
     "coding_review_gate",
-    "coding_unchanged",
     "coding_preflight",
 }
-
-
-UNCHANGED_GATE_MARKERS = (
-    "identical to the previous candidate",
-    "unchanged files are not accepted",
-    "returned all previous files but none changed",
-    "none changed functionally",
-    "changed only comments",
-    "whitespace",
-    "formatting after reviewer feedback",
-)
 
 
 def _code_free_status_message(stage: str, task_id: str, detail: str) -> AIMessage:
@@ -169,43 +147,11 @@ def _render_local_gate_feedback(state: AgentState, max_chars: int) -> str:
         f"- failed_stage: {failed_stage}",
         "- This is not external reviewer backlog, but it is a blocking instruction for the next coding retry.",
         "- The next RTL candidate must directly eliminate this local gate failure.",
-        "- If the failure says the repair scope is too small, make a broader functional control/datapath change rather than another local tweak.",
+        "- Make only the complete functional edits required by the supplied evidence and acceptance conditions.",
         "",
         report,
     ]
     return clip_text("\n".join(lines), max_chars)
-
-
-def _is_unchanged_gate_report(report: str) -> bool:
-    lowered = str(report or "").lower()
-    return any(marker in lowered for marker in UNCHANGED_GATE_MARKERS)
-
-
-def _coding_anti_stall_level(state: AgentState) -> int:
-    level = 0
-    current_report = str(
-        state.get("blocking_report")
-        or state.get("error_message")
-        or state.get("verification_report")
-        or ""
-    )
-    if (
-        str(state.get("failed_stage") or "") in LOCAL_CODING_GATE_STAGES
-        and _is_unchanged_gate_report(current_report)
-    ):
-        level += 1
-
-    for entry in _coding_feedback_entries(state):
-        stage = str(entry.get("stage") or "")
-        if stage not in IMPLEMENTATION_REVIEW_STAGES and stage not in LOCAL_CODING_GATE_STAGES:
-            continue
-        if _is_unchanged_gate_report(str(entry.get("report") or "")):
-            level += 1
-    return level
-
-
-def _is_anti_stall_mode(state: AgentState) -> bool:
-    return _coding_anti_stall_level(state) > 0
 
 
 def _extract_module_headers(files: list[dict[str, str]], max_chars: int) -> str:
@@ -225,40 +171,9 @@ def _extract_module_headers(files: list[dict[str, str]], max_chars: int) -> str:
     return clip_text("\n".join(headers), max_chars)
 
 
-def _render_previous_candidate_for_coding(
-    state: AgentState,
-    max_chars: int,
-    force_anti_stall: bool = False,
-    anti_stall_reason: str = "",
-) -> str:
+def _render_previous_candidate_for_coding(state: AgentState, max_chars: int) -> str:
     previous_files = state.get("candidate_files", [])
-    if not force_anti_stall and not _is_anti_stall_mode(state):
-        return render_files_for_prompt(previous_files, max_chars)
-
-    reason = (
-        str(anti_stall_reason or "").strip()
-        or "the Coding Team previously returned the same RTL unchanged after reviewer feedback."
-    )
-    anti_stall_level = _coding_anti_stall_level(state)
-    lines = [
-        "ANTI-STALL MODE: previous full RTL body is intentionally withheld.",
-        f"Anti-stall level: {anti_stall_level}",
-        f"Reason: {reason}",
-        "Do not reconstruct by copying the old body. Regenerate the implementation from the architecture/review obligations while preserving required filenames, module names, ports, and parameters.",
-        "",
-        "Required previous file manifest:",
-        _render_previous_candidate_manifest(previous_files),
-        "",
-        "Module/interface reference extracted from previous candidate:",
-        _extract_module_headers(previous_files, max_chars // 2),
-        "",
-        "Minimum anti-stall acceptance:",
-        "- Return every previous candidate file unless the review explicitly allows removal.",
-        "- At least one previous RTL file must contain a functional behavior change.",
-        "- The returned functional hash must differ from the previous candidate.",
-        "- The same unchanged/identical review-gate report must not apply.",
-    ]
-    return clip_text("\n".join(lines), max_chars)
+    return render_files_for_prompt(previous_files, max_chars)
 
 
 def _render_implementation_obligation_packet(
@@ -270,18 +185,7 @@ def _render_implementation_obligation_packet(
     chunk_limit = max(800, max_chars // 6)
     lines = [
         "Current architecture/review implementation obligations:",
-        "- Implement the current Architecture contract, Manager task, Supervisor assignment, and Control/Data Path plan as one coherent RTL revision.",
-        "- Treat reviewer change requests as required RTL edits unless the current plan explicitly supersedes them.",
-        "- If a review item conflicts with an older plan detail, follow the newest reviewed plan and preserve the review intent in the RTL behavior.",
-        "- Do not satisfy obligations with comments, formatting, renamed signals, or explanatory text.",
-        "- When multiple obligations touch the same behavior, rework the shared FSM/control/datapath path instead of making isolated edits.",
-        "- Before returning, every FILE block must be traceable to the current plan and to each unresolved review item below.",
-        "",
-        "Current Manager task:",
-        render_manager_task(task),
-        "",
-        "Manager handoff packet:",
-        clip_text(current_manager_handoff(state), chunk_limit),
+        "Apply the source authority and retry rules from coding_runtime_contract.md.",
         "",
         "Architecture contract obligations to preserve in RTL:",
         clip_text(state.get("architecture_contract") or "(none)", chunk_limit),
@@ -321,13 +225,6 @@ def _render_implementation_obligation_packet(
 
 def _coding_revision_mode(state: AgentState) -> str:
     attempt = state.get("coding_retry_count", 0) + 1
-    if _is_anti_stall_mode(state):
-        return (
-            f"anti-stall rebuild attempt {attempt}; the previous RTL was rejected as "
-            "unchanged after review feedback, so regenerate a functionally different "
-            "replacement from the architecture/review obligations while preserving the "
-            "required interfaces and filenames"
-        )
     if _coding_feedback_entries(state):
         return (
             f"review-driven retry attempt {attempt}; revise the previous candidate RTL "
@@ -377,23 +274,17 @@ def _coding_repair_intensity(state: AgentState) -> str:
     )
     if not _coding_feedback_entries(state):
         return "fresh implementation: implement the assignment cleanly from the plans."
-    if attempts >= 10:
+    retry_limit = max(int(state.get("max_retries", DEFAULT_MAX_RETRIES) or 0), 1)
+    if attempts >= max(retry_limit - 1, 1):
         return (
-            "full structural repair: repeated review failures mean local patching is not enough. "
-            "Rebuild the affected control/datapath implementation from the architecture, "
-            "Supervisor assignment, and Control/Data Path plan while preserving required "
-            "interfaces and file names."
+            "root-cause repair: this is a late retry. Re-derive the failing cycle and update all "
+            "dependent control/datapath assignments needed to satisfy each acceptance condition, "
+            "while preserving unrelated behavior."
         )
-    if attempts >= 6:
+    if attempts >= 1:
         return (
-            "high intensity repair: the same RTL has failed repeatedly. Rework the affected "
-            "control/datapath block, reset behavior, handshakes, and state/datapath partitioning "
-            "instead of applying a small local tweak."
-        )
-    if attempts >= 3:
-        return (
-            "medium intensity repair: make a concrete functional RTL change for each reviewer "
-            "finding and update related control/datapath logic consistently."
+            "evidence-driven repair: make the smallest complete functional edit for each active "
+            "finding and update directly dependent logic consistently."
         )
     return (
         "targeted repair: make the smallest complete functional code change that directly closes "
@@ -415,19 +306,13 @@ def _render_review_to_code_contract(state: AgentState, max_chars: int) -> str:
         "Review-to-code repair contract:",
         "- The previous candidate RTL failed review; the next output must be a complete repaired replacement.",
         "- Return every previous candidate file unless a review item explicitly requires deleting or renaming it.",
-        "- At least one previous candidate file must contain a functional RTL change, not only comments or formatting.",
         "- For each reviewer finding, identify the target RTL behavior and change the corresponding code.",
         f"- Repair intensity: {_coding_repair_intensity(state)}",
+        "- Judge closure from each finding's evidence and acceptance condition, not from edit size or a file hash.",
         "- Do not satisfy this contract with explanatory text; only FILE blocks are allowed.",
         "",
         "Previous candidate files that must be repaired or preserved:",
     ]
-    if _is_anti_stall_mode(state):
-        lines[1:1] = [
-            "- Anti-stall mode is active: do not copy or lightly restyle the previous RTL body.",
-            "- Rebuild the affected control/datapath behavior from the obligations and reviewer findings.",
-            "- The next candidate must make the previous unchanged/identical failure impossible to repeat.",
-        ]
     for item in build_file_manifest(previous_files):
         sha = str(item.get("sha256", ""))
         lines.append(f"- {item.get('filename')}: {item.get('bytes')} bytes, sha256={sha[:12]}")
@@ -453,7 +338,6 @@ CODING_PROMPT_WEIGHTS = {
     "user_request": 5,
     "architecture_contract": 9,
     "task": 5,
-    "manager_handoff": 4,
     "supervisor_plan": 10,
     "control_datapath_plan": 10,
     "implementation_obligations": 8,
@@ -481,12 +365,7 @@ def _budget_coding_prompt_payload(
     def clip_exact(text: str, limit: int) -> str:
         if limit <= 0:
             return ""
-        if len(text) <= limit:
-            return text
-        marker = "\n... [truncated]"
-        if limit <= len(marker):
-            return text[:limit]
-        return text[: limit - len(marker)] + marker
+        return clip_text(text, limit)
 
     rendered = {key: str(value) for key, value in payload.items()}
     before_sizes = {key: len(value) for key, value in rendered.items()}
@@ -617,24 +496,13 @@ def _render_deterministic_coding_action_plan(state: AgentState, max_chars: int) 
     ]
     if state.get("candidate_files"):
         lines.extend(["", "Previous candidate handling:"])
-        if _is_anti_stall_mode(state):
-            lines.extend(
-                [
-                    "- Anti-stall mode is active because a reviewed retry returned unchanged RTL.",
-                    "- Do not use the previous RTL body as the edit source.",
-                    "- Use only the previous manifest and module/interface reference to preserve filenames, module names, ports, and parameters.",
-                    "- Rebuild the affected FSM/control/datapath logic from the architecture, Supervisor assignment, Control/Data Path plan, and reviewer findings.",
-                    "- Make a functional RTL change large enough that the previous unchanged/identical gate report cannot still apply.",
-                ]
-            )
-        else:
-            lines.extend(
-                [
-                    "- Start from the previous candidate RTL.",
-                    "- Preserve required module interfaces and filenames.",
-                    "- Make real functional changes in the RTL behavior, not comments or formatting.",
-                ]
-            )
+        lines.extend(
+            [
+                "- Start from the complete previous candidate RTL.",
+                "- Preserve required module interfaces and filenames.",
+                "- Repair the behavior named by active acceptance conditions; edit size is not a pass criterion.",
+            ]
+        )
     if entries:
         lines.extend(["", "Required review repairs:"])
         lines.extend(
@@ -666,7 +534,7 @@ def _build_coding_action_plan(
     section_limit: int,
 ) -> str:
     deterministic_plan = _render_deterministic_coding_action_plan(state, section_limit)
-    system_prompt = load_prompt("verilog_coding_action_plan.md")
+    system_prompt = _load_coding_prompt("verilog_coding_action_plan.md")
     human_template = """
 Original user requirement:
 {user_request}
@@ -777,99 +645,8 @@ Deterministic minimum action plan:
     return plan
 
 
-def _functional_files_fingerprint(files: list[dict[str, str]]) -> str:
-    entries = []
-    for file_info in sorted(files, key=lambda item: item.get("filename", "")):
-        filename = str(file_info.get("filename", "")).strip()
-        content = str(file_info.get("content", ""))
-        stripped = _strip_hdl_comments(content)
-        normalized = re.sub(r"\s+", "", stripped)
-        entries.append(
-            {
-                "filename": filename,
-                "sha256": hashlib.sha256(normalized.encode()).hexdigest(),
-            }
-        )
-    encoded = json.dumps(entries, sort_keys=True, separators=(",", ":")).encode()
-    return hashlib.sha256(encoded).hexdigest()
-
-
-def _functional_file_hashes(files: list[dict[str, str]]) -> dict[str, str]:
-    hashes = {}
-    for file_info in files:
-        filename = str(file_info.get("filename", "")).strip()
-        content = str(file_info.get("content", ""))
-        stripped = _strip_hdl_comments(content)
-        normalized = re.sub(r"\s+", "", stripped)
-        hashes[filename] = hashlib.sha256(normalized.encode()).hexdigest()
-    return hashes
-
-
 def _review_repair_delta_report(state: AgentState, files: list[dict[str, str]]) -> str:
-    if not _use_review_driven_repair(state):
-        return ""
-
-    backlog_count = _coding_backlog_count(state)
-    attempts = max(
-        state.get("coding_retry_count", 0),
-        state.get("microarchitecture_retry_count", 0),
-        state.get("verification_retry_count", 0),
-    )
-    if attempts < 3 and backlog_count < 2:
-        return ""
-
-    previous_files = state.get("candidate_files", [])
-    previous_hashes = _functional_file_hashes(previous_files)
-    current_hashes = _functional_file_hashes(files)
-    changed_files = sorted(
-        name
-        for name, previous_hash in previous_hashes.items()
-        if current_hashes.get(name) != previous_hash
-    )
-    previous_file_count = len(previous_hashes)
-
-    scope_issues = []
-    if (
-        previous_file_count >= 2
-        and backlog_count >= 3
-        and len(changed_files) < min(2, previous_file_count)
-    ):
-        scope_issues.append(
-            "only one reviewed file changed while multiple backlog items remain; update the related files/modules together"
-        )
-    if not scope_issues:
-        return ""
-
-    return (
-        "Review-driven repair scope is too small for the accumulated feedback. "
-        + "; ".join(scope_issues)
-        + ". Rework the affected control/datapath behavior more substantially instead of making a shallow tweak."
-    )
-
-
-def _unchanged_reviewed_candidate_report(state: AgentState, files: list[dict[str, str]]) -> str:
-    previous_files = state.get("candidate_files", [])
-    if not previous_files or not state.get("review_feedback_log"):
-        return ""
-    feedback = _review_feedback_for_coding(state, 4000)
-    if feedback == "(none)":
-        return ""
-    exact_same = generated_files_fingerprint(files) == generated_files_fingerprint(previous_files)
-    functional_same = _functional_files_fingerprint(files) == _functional_files_fingerprint(
-        previous_files
-    )
-    if not exact_same and not functional_same:
-        return ""
-    if exact_same:
-        return (
-            "Coding team returned RTL identical to the previous candidate after reviewer feedback. "
-            "The implementation must revise the existing RTL according to the listed review report; "
-            "unchanged files are not accepted as a retry result."
-        )
-    return (
-        "Coding team changed only comments, whitespace, or formatting after reviewer feedback. "
-        "The implementation must make a functional RTL change that addresses the listed review report."
-    )
+    return ""
 
 
 def _incomplete_review_repair_report(state: AgentState, files: list[dict[str, str]]) -> str:
@@ -886,18 +663,6 @@ def _incomplete_review_repair_report(state: AgentState, files: list[dict[str, st
             f"Missing repaired/preserved files: {', '.join(missing)}"
         )
 
-    previous_hashes = _functional_file_hashes(previous_files)
-    current_hashes = _functional_file_hashes(files)
-    changed = sorted(
-        name
-        for name in previous_names
-        if previous_hashes.get(name) != current_hashes.get(name)
-    )
-    if not changed:
-        return (
-            "Review-driven repair returned all previous files but none changed functionally. "
-            "At least one reviewed RTL file must change in behavior to address reviewer findings."
-        )
     return ""
 
 
@@ -940,45 +705,6 @@ def _reject_incomplete_review_repair(
     }
 
 
-def _reject_unchanged_candidate(
-    state: AgentState,
-    task_id: str,
-    files: list[dict[str, str]],
-    messages: list,
-):
-    report = _unchanged_reviewed_candidate_report(state, files)
-    if not report:
-        return None
-    attempt = state.get("coding_retry_count", 0) + 1
-    print("---VERILOG CODING TEAM: REVIEW FEEDBACK NOT APPLIED; RTL UNCHANGED---")
-    write_text_artifact(
-        f"failed_attempts/{task_id}_unchanged_after_review_attempt_{attempt}.txt",
-        render_files(files) + "\n\n" + report,
-    )
-    force_forward = bool(
-        state.get("max_retries", DEFAULT_MAX_RETRIES)
-        and attempt >= state.get("max_retries", DEFAULT_MAX_RETRIES)
-    )
-    if force_forward:
-        print("---VERILOG CODING TEAM: LOCAL REVIEW FORCE-FORWARD THRESHOLD REACHED---")
-    return {
-        "candidate_files": files,
-        "generation_ok": False,
-        "coding_review_forced_forward": force_forward,
-        "microarchitecture_passed": False,
-        "verification_passed": False,
-        "verification_report": report,
-        "coding_retry_count": attempt,
-        "failed_stage": "" if force_forward else "coding_unchanged",
-        "blocking_report": "" if force_forward else report,
-        "messages": messages,
-        "error_message": report,
-        "review_feedback_log": append_review_feedback(
-            state, "coding_unchanged", report, task_id
-        ),
-    }
-
-
 def _coding_preflight_report(state: AgentState, files: list[dict[str, str]]) -> str:
     static_result = static_microarchitecture_review(files)
     merged_files = merge_files(state.get("final_files", []), files)
@@ -1001,7 +727,6 @@ def _hard_review_gate_report(state: AgentState, files: list[dict[str, str]]) -> 
     reports = []
     for report in (
         _incomplete_review_repair_report(state, files),
-        _unchanged_reviewed_candidate_report(state, files),
         _coding_preflight_report(state, files),
     ):
         if report:
@@ -1037,7 +762,7 @@ def _coding_closure_audit(
         return True, ""
 
     attempt = state.get("coding_retry_count", 0) + 1
-    system_prompt = load_prompt("verilog_coding_closure_review.md")
+    system_prompt = load_reviewer_prompt("verilog_coding_closure_review.md")
     human_template = """
 Original user requirement:
 {user_request}
@@ -1154,7 +879,7 @@ def _coding_quality_audit(
         f"Static microarchitecture result:\n{static_result.get('report', '')}\n\n"
         f"Syntax lint result:\n{lint_result.get('report', '')}"
     )
-    system_prompt = load_prompt("verilog_coding_quality_review.md")
+    system_prompt = load_reviewer_prompt("verilog_coding_quality_review.md")
     human_template = """
 Original user requirement:
 {user_request}
@@ -1260,25 +985,18 @@ RTL candidate to audit:
 
 def _coding_repair_scope_audit(state: AgentState, files: list[dict[str, str]]) -> dict:
     previous_files = state.get("candidate_files", [])
-    previous_hashes = _functional_file_hashes(previous_files)
-    current_hashes = _functional_file_hashes(files)
-    changed_files = sorted(
-        name
-        for name, previous_hash in previous_hashes.items()
-        if current_hashes.get(name) != previous_hash
-    )
-    new_files = sorted(name for name in current_hashes if name not in previous_hashes)
-    removed_files = sorted(name for name in previous_hashes if name not in current_hashes)
+    previous_names = {
+        str(file_info.get("filename", "")).strip() for file_info in previous_files
+    }
+    current_names = {str(file_info.get("filename", "")).strip() for file_info in files}
     return {
         "backlog_count": _coding_backlog_count(state),
         "repair_intensity": _coding_repair_intensity(state),
-        "previous_file_count": len(previous_hashes),
-        "current_file_count": len(current_hashes),
-        "changed_files": changed_files,
-        "changed_previous_file_count": len(changed_files),
-        "new_files": new_files,
-        "removed_files": removed_files,
-        "functional_change_detected": bool(changed_files or new_files or removed_files),
+        "previous_file_count": len(previous_names),
+        "current_file_count": len(current_names),
+        "new_files": sorted(current_names - previous_names),
+        "removed_files": sorted(previous_names - current_names),
+        "assessment_basis": "review finding evidence and acceptance conditions",
     }
 
 
@@ -1337,29 +1055,13 @@ def _attempt_review_gate_repair(
         section_limit,
         state.get("max_context_chars", 120_000) // 3,
     )
-    force_anti_stall = _is_unchanged_gate_report(gate_report)
-    gate_candidate_reference = _render_previous_candidate_for_coding(
-        state,
-        candidate_limit,
-        force_anti_stall=force_anti_stall,
-        anti_stall_reason=gate_report if force_anti_stall else "",
-    )
     coding_action_plan = prompt_payload["coding_action_plan"]
-    if force_anti_stall:
-        coding_action_plan = (
-            "ANTI-STALL OVERRIDE FOR THIS REPAIR PASS:\n"
-            "- The rejected candidate matched the previous reviewed RTL, so copying/editing from the old body is forbidden in this repair pass.\n"
-            "- Preserve required filenames, module names, ports, and parameters from the manifest/interface reference only.\n"
-            "- Rebuild the affected control/datapath behavior from the architecture, Supervisor assignment, Control/Data Path plan, and reviewer findings.\n"
-            "- Return a functionally different RTL candidate; the unchanged/identical gate report must not remain true.\n\n"
-            + coding_action_plan
-        )
     print("---VERILOG CODING TEAM: Local review gate failed; invoking focused repair pass---")
     write_text_artifact(
         f"logs/{task_id}_review_gate_failure_attempt_{attempt}.md",
         gate_report,
     )
-    system_prompt = load_prompt("verilog_review_gate_repair.md")
+    system_prompt = _load_coding_prompt("verilog_review_gate_repair.md")
     human_template = """
 Original user requirement:
 {user_request}
@@ -1369,9 +1071,6 @@ Architecture contract:
 
 Current Manager task:
 {task}
-
-Manager handoff packet:
-{manager_handoff}
 
 Supervisor detailed assignment:
 {supervisor_plan}
@@ -1428,23 +1127,14 @@ Raw reviewer feedback:
         "user_request": prompt_payload["user_request"],
         "architecture_contract": prompt_payload["architecture_contract"],
         "task": render_manager_task(task),
-        "manager_handoff": prompt_payload["manager_handoff"],
         "supervisor_plan": prompt_payload["supervisor_plan"],
         "control_datapath_plan": prompt_payload["control_datapath_plan"],
         "quality_contract": prompt_payload["quality_contract"],
         "implementation_obligations": prompt_payload["implementation_obligations"],
         "repair_intensity": prompt_payload["repair_intensity"],
         "coding_action_plan": coding_action_plan,
-        "previous_candidate_rtl": (
-            gate_candidate_reference
-            if force_anti_stall
-            else prompt_payload["previous_candidate_rtl"]
-        ),
-        "current_candidate_rtl": (
-            gate_candidate_reference
-            if force_anti_stall
-            else render_files_for_prompt(files, candidate_limit)
-        ),
+        "previous_candidate_rtl": prompt_payload["previous_candidate_rtl"],
+        "current_candidate_rtl": render_files_for_prompt(files, candidate_limit),
         "coding_repair_backlog": prompt_payload["coding_repair_backlog"],
         "revision_plan": prompt_payload["revision_plan"],
         "repair_brief": prompt_payload["repair_brief"],
@@ -1552,13 +1242,13 @@ def _repair_candidate_against_review_gate(
             write_text_artifact(
                 f"logs/{task_id}_review_gate_soft_warning_attempt_{state.get('coding_retry_count', 0) + 1}.md",
                 gate_report
-                + f"\n\nAutomated scope repair failed: {repair_error}\nReturning to Coding Team for a broader RTL revision.",
+                + f"\n\nAutomated repair failed: {repair_error}\nReturning to Coding Team for an evidence-driven revision.",
             )
             return (
                 files,
                 next_messages,
                 gate_report
-                + "\n\nAutomated scope repair failed. The next coding retry must make a broader functional RTL change.",
+                + "\n\nAutomated repair failed. The next coding retry must directly satisfy the reported acceptance conditions.",
             )
         return (
             files,
@@ -1579,7 +1269,7 @@ def _repair_candidate_against_review_gate(
         write_text_artifact(
             f"logs/{task_id}_review_gate_soft_warning_attempt_{state.get('coding_retry_count', 0) + 1}.md",
             second_soft_report
-            + "\n\nAutomated review-gate repair was attempted, but the repair scope is still too small. Returning to Coding Team for a broader RTL revision.",
+            + "\n\nAutomated review-gate repair did not satisfy the active acceptance conditions. Returning to Coding Team.",
         )
         write_json_artifact(
             f"logs/{task_id}_review_gate_soft_scope_audit_attempt_{state.get('coding_retry_count', 0) + 1}.json",
@@ -1676,16 +1366,12 @@ def _render_microarchitecture_repair_packet(
     static_report: str,
 ) -> str:
     task = current_manager_task(state)
-    prior_backlog = render_coding_repair_backlog(state, state.get("max_context_chars", 120_000))
     lines = [
         "Microarchitecture-to-coding repair packet:",
         f"- task: {task.get('id', task_id)} - {task.get('title', '')}",
         "- verdict: FAIL",
-        "- Coding Team must fix both previous unresolved backlog items and this new microarchitecture finding.",
-        "- Increase repair scope: update related control logic and datapath logic together, not just one local signal.",
-        "",
-        "Previously unresolved coding repair backlog:",
-        prior_backlog,
+        "- Coding Team must fix the still-observable microarchitecture findings below.",
+        "- Update directly dependent control and datapath logic consistently while preserving unrelated behavior.",
         "",
         "Static microarchitecture scan context:",
         str(static_report or "(none)").strip(),
@@ -1694,7 +1380,6 @@ def _render_microarchitecture_repair_packet(
         str(report or "Microarchitecture review failed.").strip(),
         "",
         "Required coding response:",
-        "- Revisit every backlog item above and verify whether the current RTL truly fixed it.",
         "- Modify FSM/current-state/next-state logic, control enables, done/valid/ready, load/clear, reset paths, and datapath registers as a coordinated edit when relevant.",
         "- Return complete Verilog-2001 files for every reviewed candidate file.",
         "- Ensure the next microarchitecture reviewer cannot repeat the same prior or new finding.",
@@ -1724,7 +1409,7 @@ def verilog_coding_team_agent(state: AgentState):
         )
 
     if review_driven_repair:
-        system_prompt = load_prompt("verilog_implementation_repair.md")
+        system_prompt = _load_coding_prompt("verilog_implementation_repair.md")
         human_prompt = """
 Original user requirement:
 {user_request}
@@ -1734,9 +1419,6 @@ Architecture contract:
 
 Current Manager task:
 {task}
-
-Manager handoff packet:
-{manager_handoff}
 
 Supervisor detailed assignment:
 {supervisor_plan}
@@ -1782,7 +1464,7 @@ Review-to-code repair contract:
 {feedback}
 """
     else:
-        system_prompt = load_prompt("verilog_coding.md")
+        system_prompt = _load_coding_prompt("verilog_coding.md")
         human_prompt = """
 Original user requirement:
 {user_request}
@@ -1792,9 +1474,6 @@ Architecture contract:
 
 Current Manager task:
 {task}
-
-Manager handoff packet:
-{manager_handoff}
 
 Supervisor detailed assignment:
 {supervisor_plan}
@@ -1851,7 +1530,6 @@ Review-to-code repair contract:
             state.get("architecture_contract") or "(none)", section_limit
         ),
         "task": render_manager_task(task),
-        "manager_handoff": clip_text(current_manager_handoff(state), section_limit),
         "supervisor_plan": clip_text(state.get("supervisor_plan") or "(none)", section_limit),
         "control_datapath_plan": clip_text(
             state.get("control_datapath_plan") or "(none)", section_limit
@@ -1983,7 +1661,7 @@ Review-to-code repair contract:
     exc = initial_error
     print(f"---WARNING: Coding team output failed {initial_error_kind}, attempting repair: {exc}---")
     try:
-        repair_system_prompt = load_prompt("verilog_coding_repair.md")
+        repair_system_prompt = _load_coding_prompt("verilog_coding_repair.md")
         repair_human_template = """
 Current Manager task:
 {task}
@@ -2190,16 +1868,13 @@ def microarchitecture_reviewer_agent(state: AgentState):
         previous_feedback,
     )
 
-    system_prompt = load_prompt("microarchitecture_review.md")
+    system_prompt = load_reviewer_prompt("microarchitecture_review.md")
     human_template = """
 Architecture contract:
 {architecture_contract}
 
 Current Manager task:
 {task}
-
-Manager handoff packet:
-{manager_handoff}
 
 Supervisor detailed assignment:
 {supervisor_plan}
@@ -2231,7 +1906,6 @@ RTL candidate:
     payload = {
         "architecture_contract": state.get("architecture_contract") or "(none)",
         "task": render_manager_task(task),
-        "manager_handoff": current_manager_handoff(state),
         "supervisor_plan": state["supervisor_plan"],
         "control_datapath_plan": state.get("control_datapath_plan") or "(none)",
         "static_report": static_result["report"],
@@ -2317,8 +1991,18 @@ RTL candidate:
         "review_feedback_log": append_review_feedback(
             state,
             "microarchitecture_review",
-            repair_packet,
+            report or "Microarchitecture review failed.",
             task_id,
+        ),
+        "forced_forward_debt": (
+            append_forced_forward_debt(
+                state,
+                "microarchitecture_review",
+                report or "Microarchitecture review failed.",
+                task_id,
+            )
+            if force_forward
+            else state.get("forced_forward_debt", [])
         ),
         "messages": [response],
     }

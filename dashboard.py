@@ -46,6 +46,7 @@ def is_client_disconnect(exc: BaseException) -> bool:
 
 
 STAGES = [
+    ("manager", "Manager", "manager_review", "", "manager"),
     ("architecture", "Architecture", "architecture_review", "architecture_review_forced_forward", "architecture"),
     ("supervisor", "Supervisor", "supervisor_review", "supervisor_review_forced_forward", "supervisor"),
     ("control_datapath", "Control/Data Path", "control_datapath_review", "control_datapath_review_forced_forward", "control_datapath"),
@@ -57,6 +58,7 @@ STAGES = [
 ]
 
 RETRY_COUNT_FIELDS = {
+    "manager": ("manager_review_retry_count",),
     "architecture": ("architecture_retry_count",),
     "supervisor": ("supervisor_retry_count",),
     "control_datapath": ("control_datapath_retry_count",),
@@ -67,6 +69,7 @@ RETRY_COUNT_FIELDS = {
 }
 
 RETRY_LIMIT_FIELDS = {
+    "manager": ("max_manager_retries",),
     "architecture": ("max_architecture_retries",),
     "supervisor": ("max_supervisor_retries",),
     "control_datapath": ("max_control_datapath_retries",),
@@ -981,6 +984,12 @@ def start_agent_run(root: Path, payload: dict) -> dict:
     spec_path.write_text(spec_text, encoding="utf-8")
 
     max_retries = env_int(("DASHBOARD_MAX_RETRIES", "MAX_RETRIES"), 3, 0, 999)
+    max_manager_retries = env_int(
+        ("DASHBOARD_MAX_MANAGER_RETRIES", "MAX_MANAGER_RETRIES"),
+        max_retries,
+        0,
+        999,
+    )
     max_architecture_retries = env_int(
         ("DASHBOARD_MAX_ARCHITECTURE_RETRIES", "MAX_ARCHITECTURE_RETRIES"),
         max_retries,
@@ -1015,6 +1024,8 @@ def start_agent_run(root: Path, payload: dict) -> dict:
         str(artifact_dir),
         "--max-retries",
         str(max_retries),
+        "--max-manager-retries",
+        str(max_manager_retries),
         "--max-architecture-retries",
         str(max_architecture_retries),
         "--max-supervisor-retries",
@@ -1032,10 +1043,13 @@ def start_agent_run(root: Path, payload: dict) -> dict:
         command.append("--auto-approve")
     no_testbench = env_bool(("DASHBOARD_NO_TESTBENCH", "NO_TESTBENCH"), False)
     require_lint = env_bool(("DASHBOARD_REQUIRE_LINT", "REQUIRE_LINT"), False)
+    run_simulation = env_bool(("DASHBOARD_RUN_SIMULATION", "RUN_SIMULATION"), False)
     if no_testbench:
         command.append("--no-testbench")
     if require_lint:
         command.append("--require-lint")
+    if run_simulation:
+        command.append("--run-simulation")
 
     llm_provider = str(payload.get("llmProvider") or "").strip()
     if llm_provider:
@@ -1060,6 +1074,7 @@ def start_agent_run(root: Path, payload: dict) -> dict:
             "auto_approve": auto_approve,
             "no_testbench": no_testbench,
             "require_lint": require_lint,
+            "run_simulation": run_simulation,
             "max_retries": max_retries,
             "max_architecture_retries": max_architecture_retries,
             "max_supervisor_retries": max_supervisor_retries,
@@ -1096,6 +1111,12 @@ def continue_agent_run(root: Path, payload: dict) -> dict:
         raise ValueError("The selected run is already active.")
 
     max_retries = env_int(("DASHBOARD_MAX_RETRIES", "MAX_RETRIES"), 3, 0, 999)
+    max_manager_retries = env_int(
+        ("DASHBOARD_MAX_MANAGER_RETRIES", "MAX_MANAGER_RETRIES"),
+        max_retries,
+        0,
+        999,
+    )
     max_architecture_retries = env_int(
         ("DASHBOARD_MAX_ARCHITECTURE_RETRIES", "MAX_ARCHITECTURE_RETRIES"),
         max_retries,
@@ -1129,6 +1150,8 @@ def continue_agent_run(root: Path, payload: dict) -> dict:
         str(run_dir),
         "--max-retries",
         str(max_retries),
+        "--max-manager-retries",
+        str(max_manager_retries),
         "--max-architecture-retries",
         str(max_architecture_retries),
         "--max-supervisor-retries",
@@ -1144,12 +1167,15 @@ def continue_agent_run(root: Path, payload: dict) -> dict:
     auto_approve = env_bool(("DASHBOARD_AUTO_APPROVE", "AUTO_APPROVE_FINAL"), True)
     no_testbench = env_bool(("DASHBOARD_NO_TESTBENCH", "NO_TESTBENCH"), False)
     require_lint = env_bool(("DASHBOARD_REQUIRE_LINT", "REQUIRE_LINT"), False)
+    run_simulation = env_bool(("DASHBOARD_RUN_SIMULATION", "RUN_SIMULATION"), False)
     if auto_approve:
         command.append("--auto-approve")
     if no_testbench:
         command.append("--no-testbench")
     if require_lint:
         command.append("--require-lint")
+    if run_simulation:
+        command.append("--run-simulation")
 
     llm_provider = str(payload.get("llmProvider") or "").strip()
     if llm_provider:
@@ -1190,6 +1216,7 @@ def continue_agent_run(root: Path, payload: dict) -> dict:
                 "auto_approve": auto_approve,
                 "no_testbench": no_testbench,
                 "require_lint": require_lint,
+                "run_simulation": run_simulation,
                 "max_retries": max_retries,
                 "max_architecture_retries": max_architecture_retries,
                 "max_supervisor_retries": max_supervisor_retries,

@@ -42,9 +42,6 @@ User requirement:
 Manager plan:
 {manager_plan}
 
-Manager handoff details:
-{manager_handoff}
-
 Architecture revision mode:
 {revision_mode}
 
@@ -71,12 +68,6 @@ Architecture reviewer revision checklist:
     payload = {
         "user_request": state["user_request"],
         "manager_plan": render_manager_plan(state["manager_plan"]),
-        "manager_handoff": (
-            "Full Manager handoff:\n"
-            f"{render_manager_plan(state['manager_plan'])}\n\n"
-            "Original user requirement, authoritative source:\n"
-            f"{state['user_request']}"
-        ),
         "previous_architecture_contract": state.get("architecture_contract") or "(none)",
         "revision_mode": revision_mode,
         "revision_checklist": revision_checklist,
@@ -128,7 +119,7 @@ Architecture reviewer revision checklist:
 @_with_runtime
 def architecture_review_agent(state: AgentState):
     print("---ARCHITECTURE REVIEW: Checking architecture contract completeness---")
-    system_prompt = load_prompt("architecture_review.md")
+    system_prompt = load_reviewer_prompt("architecture_review.md")
     human_template = """
 Original user requirement:
 {user_request}
@@ -153,12 +144,7 @@ Architecture contract:
     )
     payload = {
         "user_request": state["user_request"],
-        "manager_handoff": (
-            "Full Manager handoff:\n"
-            f"{render_manager_plan(state['manager_plan'])}\n\n"
-            "Original user requirement, authoritative source:\n"
-            f"{state['user_request']}"
-        ),
+        "manager_handoff": render_manager_plan(state["manager_plan"]),
         "architecture_contract": state.get("architecture_contract") or "(none)",
     }
     log_agent_prompt(
@@ -220,6 +206,11 @@ Architecture contract:
         "blocking_report": "" if force_forward else review_report,
         "review_feedback_log": append_review_feedback(
             state, "architecture_review", review_report
+        ),
+        "forced_forward_debt": (
+            append_forced_forward_debt(state, "architecture_review", report or review_report, "global")
+            if force_forward
+            else state.get("forced_forward_debt", [])
         ),
         "messages": [response],
     }

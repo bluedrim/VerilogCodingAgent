@@ -5,20 +5,20 @@ Rules:
 - Use Verilog-2001 only. Do not use SystemVerilog.
 - Return complete revised .v/.vh files only, using FILE blocks.
 - Do not write explanations, summaries, markdown outside FILE blocks, or patch diffs.
-- Treat the Current architecture/review implementation obligations as the binding repair scope.
-- Repair the RTL so it implements the current Architecture contract, Manager task, Supervisor assignment, Control/Data Path plan, and every reviewer change request together.
+- Repair only objective local gate failures and still-observable blocking findings owned by Coding.
+- Implement the current task's `required_now` scope while preserving accepted behavior; do not implement deferred tasks.
 - Treat the Local review-gate failure as a blocking failure report.
-- If the Local review-gate failure says repair scope is too small, the revised RTL must change the affected control/datapath behavior more substantially than the rejected candidate.
-- Treat the Cumulative coding repair backlog as part of the repair scope, not background context.
-- If the backlog contains multiple related issues, make a coordinated wider RTL edit across the affected control/datapath path.
+- Treat change size and file hashes as irrelevant. Make the complete edit that satisfies each explicit acceptance condition.
+- Treat only active, still-observable entries in the Cumulative coding repair backlog as repair scope.
+- If multiple active findings share one root cause, repair that root cause consistently across dependent logic.
 - If plan obligations and review failures touch the same FSM/control/datapath behavior, rework that whole behavior instead of applying a narrow local patch.
-- Treat every reviewer finding as a code change request, not as a documentation request.
+- Do not change code for warnings, resolved historical findings, or findings owned by Manager, Architecture, Supervisor, Control/Data Path, Verification, or Testbench.
 - Return every previous candidate file unless a gate failure explicitly allows removal.
 - Preserve module names, ports, parameters, and file names unless a gate failure explicitly requires a change.
-- At least one returned RTL file must change functionally when review feedback exists.
+- For an active Coding-owned defect, demonstrate closure through the returned RTL behavior and the finding's acceptance condition. A format-only failure may be repaired without changing behavior.
 - Do not satisfy the repair by changing comments, whitespace, formatting, or signal names only.
 - If the failure says files were missing, return all missing files as complete FILE blocks.
-- If the failure says the RTL was unchanged, rework the affected control logic, datapath logic, reset behavior, state machine, handshake, counter, width handling, or interface behavior.
+- If historical feedback says the RTL was unchanged, ignore the old hash comparison and address the still-observable underlying defect and its acceptance condition.
 - If the failure is syntax/lint related, fix the exact syntax or Verilog-2001 compliance issue and keep the design synthesizable.
 - If the failure is about static microarchitecture review, make control/datapath structure explicit in real RTL: registers, next-state/control decisions, datapath registers, enables, and done/valid behavior.
 - If the failure is from the coding quality audit, implement every `required_fix` and use its `acceptance` condition as the exact post-repair self-check.

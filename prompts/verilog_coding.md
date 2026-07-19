@@ -8,16 +8,15 @@ Rules:
 - Preserve existing module interfaces unless the Supervisor explicitly requires an extension.
 - Implement the Control/Data Path plan faithfully.
 - Treat the Current architecture/review implementation obligations as the binding implementation packet.
-- Reflect the current Architecture contract, Manager task, Supervisor assignment, Control/Data Path plan, and reviewer change requests in one coherent RTL implementation.
+- Implement the current Manager task's `required_now` scope in one coherent RTL revision. Use Architecture, Supervisor, and Control/Data Path documents as current constraints and preservation rules; do not implement explicitly deferred future tasks.
 - Do not select only the easiest review item. The returned code must address every listed required change request.
-- If the obligations include a local Coding Team gate failure, treat it as blocking. In particular, a "repair scope is too small" failure requires a broader functional RTL change.
-- Treat the Mandatory RTL coding action plan as the execution checklist. Every returned file must reflect that plan in actual RTL behavior.
+- If the obligations include a local Coding Team gate failure, treat its objective evidence and acceptance condition as blocking.
+- Treat the Mandatory RTL coding action plan as the execution checklist. Each applicable action must be reflected in the affected returned file; unaffected files need only be preserved.
 - Treat the Cumulative coding repair backlog as required scope. Close old unresolved items together with new findings in one RTL update.
 - If several backlog items refer to related behavior, rework the shared control/datapath path instead of changing one line.
 - When reviewer feedback is provided, treat it as a mandatory change request:
   - Modify the previous candidate RTL directly to address every blocking item.
-  - Do not return the same files unchanged after a failed review.
-  - If the previous candidate section says ANTI-STALL MODE, the old RTL body was withheld because copying it caused unchanged failures. Regenerate from the obligations and interface reference instead of copying old logic.
+  - Use the previous candidate as the edit baseline and repair every still-observable blocking finding.
   - If a Review-to-code repair contract is provided, return every previous candidate file listed there unless a review item explicitly requires deletion or renaming.
   - Keep fixes local and complete; every returned file must be the full revised file, not a patch.
   - Use the Reviewer fix checklist as the authoritative repair list.
@@ -26,8 +25,8 @@ Rules:
   - Use the Targeted repair brief to decide which control/datapath behavior must change.
   - Preserve already-correct logic while changing the minimum RTL needed to close each finding.
   - If several findings interact, fix the root control/datapath behavior instead of adding cosmetic edits.
-  - Follow the Coding repair intensity. Repeated failures require broader control/datapath rework, not another minimal tweak.
-  - Comment-only, whitespace-only, or formatting-only changes do not count as reviewer feedback fixes.
+  - Follow the Coding repair intensity. On later retries, re-derive the root cause and update all directly dependent logic while preserving unrelated behavior.
+  - Comments, whitespace, formatting, renamed signals, edit size, and file hashes are not repair evidence; the finding's acceptance condition is.
 - Separate control and datapath clearly in the code:
   - Use distinct next-state/current-state logic for FSMs with reg/wire declarations.
   - Use explicit control signals for enables, mux selects, load/clear, valid/ready, done/error.
@@ -57,15 +56,11 @@ Rules:
 - Before returning, self-check that control signals and datapath signals are explicit enough for the microarchitecture reviewer.
 - Before returning, self-check that the code would pass a basic Verilog syntax lint.
 - Before returning, self-check every item in the RTL implementation quality contract and Mandatory RTL coding action plan against a concrete line/block in the returned files.
-- Preferred output is this FILE block format, repeated once per file:
+- Use exactly this FILE block format, repeated once per file:
   FILE: module_name.v
   ```verilog
   complete Verilog-2001 file content
   ```
 - Do not write explanatory prose before, between, or after FILE blocks.
-- Alternative raw JSON schema is allowed only if you can safely escape every newline, quote, and backslash:
-  [
-    {{"filename": "module_name.v", "content": "complete Verilog-2001 file content"}}
-  ]
-- Each FILE block or content value must contain the complete file content.
-- Do not mix explanatory prose with either output format.
+- Each FILE block must contain the complete file content.
+- Do not emit JSON or mix output formats.

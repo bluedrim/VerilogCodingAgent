@@ -2,7 +2,9 @@
 
 Multi-agent RTL generation workflow for synthesizable Verilog-2001 RTL.
 
-The agent breaks a user RTL request into implementation tasks, creates an architecture contract, plans control logic and datapath, generates RTL, reviews microarchitecture quality, runs lint when available, and optionally creates a smoke testbench.
+The agent breaks a user RTL request into independently lintable implementation increments, semantically reviews the Manager plan, creates an architecture contract, plans control logic and datapath, generates RTL, and runs scoped review gates. Reviewer findings use a shared structured JSON contract with explicit owner, evidence, required fix, and acceptance fields. When available, final self-checking testbenches are compiled and executed with `iverilog` and `vvp`.
+
+Force-forward lets the pipeline continue after a configured review threshold, but unresolved findings remain in a review-debt ledger and are shown in the final summary. Configure output capacity with `LLM_MAX_TOKENS` and Manager review retries with `MAX_MANAGER_RETRIES` in `.env`. Testbench execution is optional and disabled by default; enable it with `--run-simulation` or `RUN_SIMULATION=true`.
 
 See [AGENT_USAGE.md](AGENT_USAGE.md) for setup and run examples.
 

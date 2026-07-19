@@ -26,6 +26,14 @@ def final_review_agent(state: AgentState):
     print("\n" + "-" * 20 + " FINAL REVIEW " + "-" * 20)
     print(f"Top module candidates: {', '.join(state.get('top_module_candidates', [])) or '(unknown)'}")
     print(f"Final lint: {state.get('final_lint_report') or '(not run)'}")
+    forced_debt = state.get("forced_forward_debt", [])
+    if forced_debt:
+        print(f"Open force-forward review debt: {len(forced_debt)} item(s)")
+        for item in forced_debt:
+            print(
+                f"- stage={item.get('stage', 'unknown')} task={item.get('task_id', 'global')}: "
+                f"{item.get('report', '')}"
+            )
     print(render_files_for_prompt(all_files, state.get("max_context_chars", 120_000)))
     print("\n" + "-" * 54)
     feedback = input("Write files? (approve / reject): ").strip().lower()
@@ -72,6 +80,7 @@ def summary_agent(state: AgentState):
         or ""
     )
     retry_counts = {
+        "manager": state.get("manager_review_retry_count", 0),
         "architecture": state.get("architecture_retry_count", 0),
         "supervisor": state.get("supervisor_retry_count", 0),
         "control_datapath": state.get("control_datapath_retry_count", 0),
@@ -81,6 +90,7 @@ def summary_agent(state: AgentState):
         "testbench": state.get("testbench_retry_count", 0),
     }
     retry_limits = {
+        "manager": state.get("max_manager_retries", 0),
         "architecture": state.get("max_architecture_retries", 0),
         "supervisor": state.get("max_supervisor_retries", 0),
         "control_datapath": state.get("max_control_datapath_retries", 0),
@@ -107,6 +117,7 @@ def summary_agent(state: AgentState):
         "active_task_id": active_task.get("id", ""),
         "active_task_title": active_task.get("title", ""),
         "stage_pass_flags": {
+            "manager_review": state.get("manager_review_passed", False),
             "architecture_review": state.get("architecture_review_passed", False),
             "architecture_review_forced_forward": state.get(
                 "architecture_review_forced_forward", False
@@ -139,6 +150,7 @@ def summary_agent(state: AgentState):
         "retry_limits": retry_limits,
         "stage_retry_limits_enforced": True,
         "review_force_forward_after": {
+            "manager": state.get("max_manager_retries", 0),
             "architecture": state.get("max_architecture_retries", 0),
             "supervisor": state.get("max_supervisor_retries", 0),
             "control_datapath": state.get("max_control_datapath_retries", 0),
@@ -148,6 +160,7 @@ def summary_agent(state: AgentState):
             "final_lint": state.get("max_testbench_retries", 0),
         },
         "last_reports": {
+            "manager": state.get("manager_review_report", ""),
             "architecture": state.get("architecture_review_report", ""),
             "supervisor": state.get("supervisor_review_report", ""),
             "control_datapath": state.get("control_datapath_review_report", ""),
@@ -165,6 +178,8 @@ def summary_agent(state: AgentState):
         "blocking_report": blocking_report,
         "writer_errors": writer_errors,
         "review_feedback_log": state.get("review_feedback_log", []),
+        "forced_forward_debt": state.get("forced_forward_debt", []),
+        "forced_forward_debt_count": len(state.get("forced_forward_debt", [])),
         "artifact_dir": str(ARTIFACT_DIR),
         "stage_snapshot": stage_snapshot,
         "stage_snapshot_saved": str(ARTIFACT_DIR / "run_progress_snapshot.json"),
@@ -213,6 +228,7 @@ def summary_agent(state: AgentState):
         "last_lint_report": state.get("lint_report", ""),
         "lint_tool": discover_lint_tool(),
         "require_lint": state.get("require_lint", False),
+        "run_simulation": state.get("run_simulation", False),
         "lint_timeout_seconds": state.get("lint_timeout_seconds", 30),
         "allow_blackboxes": state.get("allow_blackboxes", False),
         "max_generated_file_bytes": state.get("max_generated_file_bytes", 0),
@@ -227,6 +243,7 @@ def summary_agent(state: AgentState):
         "retry_limits": retry_limits,
         "stage_retry_limits_enforced": True,
         "review_force_forward_after": {
+            "manager": state.get("max_manager_retries", 0),
             "architecture": state.get("max_architecture_retries", 0),
             "supervisor": state.get("max_supervisor_retries", 0),
             "control_datapath": state.get("max_control_datapath_retries", 0),

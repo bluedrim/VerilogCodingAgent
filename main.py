@@ -39,6 +39,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--max-manager-retries",
+        type=positive_int,
+        default=os.getenv(
+            "MAX_MANAGER_RETRIES",
+            os.getenv("MAX_RETRIES", str(DEFAULT_MAX_RETRIES)),
+        ),
+        help=(
+            "Manager semantic review repair threshold. Defaults to MAX_MANAGER_RETRIES "
+            "or MAX_RETRIES; set 0 to use the default bounded semantic review count."
+        ),
+    )
+    parser.add_argument(
         "--max-architecture-retries",
         type=positive_int,
         default=os.getenv(
@@ -130,6 +142,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--require-lint",
         action="store_true",
         help="Fail when neither verilator nor iverilog is installed.",
+    )
+    parser.add_argument(
+        "--run-simulation",
+        action="store_true",
+        default=os.getenv("RUN_SIMULATION", "").strip().lower() in {"1", "true", "yes", "on"},
+        help=(
+            "Execute the generated self-checking testbench with iverilog/vvp when available. "
+            "Disabled by default; enable with RUN_SIMULATION=true."
+        ),
     )
     parser.add_argument(
         "--lint-timeout",
@@ -229,12 +250,16 @@ class AgentState(TypedDict):
     messages: Annotated[List[BaseMessage], lambda x, y: x + y]
     user_request: str
     manager_plan: List[Dict[str, str]]
+    manager_review_passed: bool
+    manager_review_report: str
+    manager_review_retry_count: int
     architecture_contract: str
     architecture_review_passed: bool
     architecture_review_report: str
     architecture_review_forced_forward: bool
     architecture_retry_count: int
     max_architecture_retries: int
+    max_manager_retries: int
     current_task_index: int
     supervisor_plan: str
     supervisor_review_passed: bool
@@ -266,6 +291,7 @@ class AgentState(TypedDict):
     verification_report: str
     lint_report: str
     require_lint: bool
+    run_simulation: bool
     lint_timeout_seconds: int
     llm_timeout_seconds: int
     allow_blackboxes: bool
@@ -281,6 +307,7 @@ class AgentState(TypedDict):
     failed_stage: str
     blocking_report: str
     review_feedback_log: List[Dict[str, str]]
+    forced_forward_debt: List[Dict[str, str]]
     max_generated_file_bytes: int
     max_generated_files: int
     max_context_chars: int
@@ -342,6 +369,10 @@ def load_prompt(filename: str) -> str:
         return prompt_path.read_text(encoding="utf-8").strip()
     except OSError as exc:
         raise FileNotFoundError(f"Prompt file not found: {prompt_path}") from exc
+
+
+def load_reviewer_prompt(filename: str) -> str:
+    return f"{load_prompt('reviewer_contract.md')}\n\n{load_prompt(filename)}"
 
 
 def derive_project_keyword(requirement: str, fallback: str = "verilog_project") -> str:
@@ -550,16 +581,23 @@ def _parse_review_json_result(result: object):
         raise TypeError("Review JSON result must be an object.")
 
     result = {_normalize_review_key(key): value for key, value in result.items()}
-    passed = _review_pass_value(result)
+    explicit_verdict = _explicit_review_verdict(result)
+    passed = explicit_verdict if explicit_verdict is not None else False
     report = _review_report_value(result)
-    if not passed and _review_report_is_nonblocking_pass(report):
-        passed = True
-    if passed and _review_report_has_blocking_failure(report):
-        passed = False
+    if explicit_verdict is None:
+        if _review_report_is_nonblocking_pass(report):
+            passed = True
+        elif _review_report_has_blocking_failure(report):
+            passed = False
     return passed, report
 
 
 def _review_pass_value(result: Dict[str, object]) -> bool:
+    explicit_verdict = _explicit_review_verdict(result)
+    return explicit_verdict if explicit_verdict is not None else False
+
+
+def _explicit_review_verdict(result: Dict[str, object]) -> Optional[bool]:
     pass_keys = (
         "pass",
         "passed",
@@ -600,7 +638,7 @@ def _review_pass_value(result: Dict[str, object]) -> bool:
             return True
         if value in FALSE_REVIEW_VALUES:
             return False
-    return False
+    return None
 
 
 def _review_report_value(result: Dict[str, object]) -> str:
@@ -608,10 +646,8 @@ def _review_report_value(result: Dict[str, object]) -> str:
         "report",
         "reason",
         "feedback",
-        "summary",
         "message",
         "details",
-        "findings",
         "comments",
         "notes",
     ):
@@ -620,7 +656,34 @@ def _review_report_value(result: Dict[str, object]) -> str:
             return value.strip()
         if isinstance(value, list) and value:
             return "\n".join(str(item).strip() for item in value if str(item).strip())
+    structured_parts = []
+    summary = result.get("summary")
+    if isinstance(summary, str) and summary.strip():
+        structured_parts.append(summary.strip())
+    findings = result.get("blocking_findings")
+    if isinstance(findings, list):
+        for idx, finding in enumerate(findings, start=1):
+            structured_parts.append(_format_structured_review_item(finding, idx, "blocking"))
+    warnings = result.get("warnings")
+    if isinstance(warnings, list):
+        for idx, warning in enumerate(warnings, start=1):
+            structured_parts.append(_format_structured_review_item(warning, idx, "warning"))
+    if structured_parts:
+        return "\n\n".join(part for part in structured_parts if part)
     return json.dumps(result, ensure_ascii=False)
+
+
+def _format_structured_review_item(item: object, index: int, kind: str) -> str:
+    if not isinstance(item, dict):
+        return f"{kind}[{index}]: {str(item).strip()}"
+    fields = []
+    for key in ("id", "owner", "target", "evidence", "required_fix", "acceptance"):
+        value = item.get(key)
+        if value not in (None, "", [], {}):
+            fields.append(f"{key}: {str(value).strip()}")
+    if not fields:
+        return f"{kind}[{index}]: {json.dumps(item, ensure_ascii=False)}"
+    return f"{kind}[{index}]\n" + "\n".join(fields)
 
 
 def _review_report_is_nonblocking_pass(report: str) -> bool:
@@ -754,13 +817,33 @@ def validate_plan(plan: object, max_tasks: int = 32):
         return False, "Manager plan must be a non-empty JSON list."
     if max_tasks and len(plan) > max_tasks:
         return False, f"Manager plan has {len(plan)} tasks, above limit {max_tasks}."
+    required_fields = (
+        "id",
+        "title",
+        "goal",
+        "deliverable",
+        "user_requirement_trace",
+        "dependencies",
+        "required_now",
+        "preserve_from_previous",
+        "deferred_scope",
+        "interfaces",
+        "behavior",
+        "reset_clocking",
+        "acceptance_criteria",
+    )
     seen_ids = set()
     for idx, task in enumerate(plan):
         if not isinstance(task, dict):
             return False, f"Task {idx} must be an object."
-        for key in ("id", "title", "goal", "deliverable"):
+        for key in required_fields:
             if key not in task or not isinstance(task[key], str) or not task[key].strip():
                 return False, f"Task {idx} must include a non-empty '{key}'."
+            if task[key].strip().upper() == "TBD":
+                return False, (
+                    f"Task {idx} field '{key}' uses ambiguous bare TBD. "
+                    "Use BLOCKING_TBD, DESIGN_CHOICE, ASSUMPTION, or N/A with a reason."
+                )
         task_id = task["id"].strip()
         if task_id in seen_ids:
             return False, f"Task id '{task_id}' is duplicated."
@@ -842,6 +925,9 @@ def render_manager_task(task: Dict[str, object]) -> str:
         "goal",
         "user_requirement_trace",
         "dependencies",
+        "required_now",
+        "preserve_from_previous",
+        "deferred_scope",
         "interfaces",
         "parameters",
         "control_logic",
@@ -870,9 +956,7 @@ def current_manager_handoff(state: "AgentState") -> str:
         "Current task handoff from Manager:\n"
         f"{render_manager_task(task)}\n\n"
         "Original user requirement, authoritative source:\n"
-        f"{state['user_request']}\n\n"
-        "Full ordered Manager plan:\n"
-        f"{render_manager_plan(state['manager_plan'])}"
+        f"{state['user_request']}"
     )
 
 
@@ -896,6 +980,46 @@ def append_review_feedback(
         }
     )
     return feedback_log[-20:]
+
+
+def append_forced_forward_debt(
+    state: "AgentState", stage: str, report: str, task_id: str | None = None
+) -> List[Dict[str, str]]:
+    debt = list(state.get("forced_forward_debt", []))
+    clean_report = str(report or "").strip() or "Forced forward without a detailed report."
+    if task_id is None:
+        try:
+            task_id = str(current_manager_task(state).get("id") or "global")
+        except (IndexError, KeyError, TypeError):
+            task_id = "global"
+    fingerprint = normalized_text_fingerprint(clean_report)[:16]
+    if not any(
+        entry.get("stage") == str(stage)
+        and entry.get("task_id") == str(task_id)
+        and entry.get("fingerprint") == fingerprint
+        for entry in debt
+    ):
+        debt.append(
+            {
+                "stage": str(stage),
+                "task_id": str(task_id),
+                "report": clean_report,
+                "status": "OPEN_FORCED_FORWARD",
+                "fingerprint": fingerprint,
+            }
+        )
+    return debt[-50:]
+
+
+def resolve_forced_forward_debt(
+    state: "AgentState", stages: tuple[str, ...]
+) -> List[Dict[str, str]]:
+    stage_set = set(stages)
+    return [
+        entry
+        for entry in state.get("forced_forward_debt", [])
+        if entry.get("stage") not in stage_set
+    ]
 
 
 def render_review_feedback(
@@ -924,7 +1048,6 @@ CODING_REPAIR_BACKLOG_STAGES = (
     "verification_lint",
     "coding_format",
     "coding_gate_internal",
-    "coding_unchanged",
     "coding_preflight",
 )
 
@@ -937,6 +1060,11 @@ CODING_BACKLOG_SNAPSHOT_STAGES = {
 
 
 def active_coding_feedback_entries(state: "AgentState") -> List[Dict[str, str]]:
+    debt_entries = [
+        entry
+        for entry in state.get("forced_forward_debt", [])
+        if entry.get("stage") in CODING_REPAIR_BACKLOG_STAGES
+    ]
     entries = review_feedback_entries(state, CODING_REPAIR_BACKLOG_STAGES)
     latest_snapshot_index = -1
     for idx, entry in enumerate(entries):
@@ -944,7 +1072,18 @@ def active_coding_feedback_entries(state: "AgentState") -> List[Dict[str, str]]:
             latest_snapshot_index = idx
     if latest_snapshot_index >= 0:
         entries = entries[latest_snapshot_index:]
-    return entries
+    return [
+        entry for entry in (debt_entries + entries) if _review_entry_targets_coding(entry)
+    ]
+
+
+def _review_entry_targets_coding(entry: Dict[str, str]) -> bool:
+    report = str(entry.get("report", ""))
+    owners = {
+        match.strip().lower()
+        for match in re.findall(r"^owner:\s*([a-z_]+)\s*$", report, flags=re.M | re.I)
+    }
+    return not owners or "coding" in owners
 
 
 def render_coding_repair_backlog(state: "AgentState", max_chars: int = 12000) -> str:
@@ -970,7 +1109,7 @@ def render_coding_repair_backlog(state: "AgentState", max_chars: int = 12000) ->
         "Cumulative coding repair backlog:",
         "- These are previous unresolved coding repair items unless the current RTL clearly fixed them.",
         "- Reviewers must keep still-unresolved previous items and add new findings in the next FAIL packet.",
-        "- Coding Team must close this backlog with a broader coordinated RTL edit, not isolated tiny tweaks.",
+        "- Coding Team must close each active item with evidence-driven edits that satisfy its acceptance condition.",
         "",
     ]
     for idx, entry in enumerate(deduped[-12:], start=1):
@@ -1842,8 +1981,13 @@ def render_files(files: List[Dict[str, str]]) -> str:
 def clip_text(text: str, max_chars: int) -> str:
     if max_chars <= 0 or len(text) <= max_chars:
         return text
-    omitted = len(text) - max_chars
-    return text[:max_chars] + f"\n\n[TRUNCATED: omitted {omitted} characters]"
+    marker = "\n\n[TRUNCATED MIDDLE: beginning and ending context retained]\n\n"
+    if max_chars <= len(marker) + 2:
+        return text[:max_chars]
+    content_budget = max_chars - len(marker)
+    head_chars = (content_budget * 3) // 5
+    tail_chars = content_budget - head_chars
+    return text[:head_chars] + marker + text[-tail_chars:]
 
 
 def split_context_budget(max_chars: int, sections: int = 8) -> int:
@@ -1854,7 +1998,58 @@ def split_context_budget(max_chars: int, sections: int = 8) -> int:
 
 
 def render_files_for_prompt(files: List[Dict[str, str]], max_chars: int) -> str:
-    return clip_text(render_files(files), max_chars)
+    if not files:
+        return "(no RTL files yet)"
+
+    rendered = render_files(files)
+    if max_chars <= 0 or len(rendered) <= max_chars:
+        return rendered
+
+    manifest_lines = ["RTL FILE MANIFEST (all candidate files):"]
+    for file_info in files:
+        filename = str(file_info.get("filename", "unnamed.v"))
+        content = str(file_info.get("content", ""))
+        manifest_lines.append(f"- {filename}: {len(content)} characters")
+    manifest = "\n".join(manifest_lines)
+
+    headers = [
+        f"--- FILE: {str(file_info.get('filename', 'unnamed.v'))} ---\n"
+        for file_info in files
+    ]
+    separator_chars = max(len(files) - 1, 0) * 2
+    fixed_chars = len(manifest) + 2 + sum(len(header) for header in headers) + separator_chars
+    if fixed_chars >= max_chars:
+        return clip_text(manifest + "\n\n" + rendered, max_chars)
+
+    contents = [str(file_info.get("content", "")) for file_info in files]
+    body_budget = max_chars - fixed_chars
+    allocations = [0] * len(contents)
+    pending = set(range(len(contents)))
+    remaining = body_budget
+    while pending and remaining > 0:
+        share = max(remaining // len(pending), 1)
+        completed = {
+            index for index in pending if len(contents[index]) <= share
+        }
+        if not completed:
+            for index in sorted(pending):
+                grant = min(share, remaining)
+                allocations[index] += grant
+                remaining -= grant
+                if remaining <= 0:
+                    break
+            break
+        for index in completed:
+            grant = min(len(contents[index]), remaining)
+            allocations[index] = grant
+            remaining -= grant
+        pending -= completed
+
+    sections = []
+    for header, content, allocation in zip(headers, contents, allocations):
+        excerpt = clip_text(content, allocation) if allocation > 0 else ""
+        sections.append(header + excerpt)
+    return manifest + "\n\n" + "\n\n".join(sections)
 
 
 def current_manager_task(state: AgentState):
@@ -1909,6 +2104,73 @@ def run_syntax_lint(
         }
 
 
+def run_testbench_simulation(
+    files: List[Dict[str, str]], timeout_seconds: int = 30
+) -> Dict[str, object]:
+    if not files:
+        return {"passed": False, "skipped": False, "report": "No files were available for simulation."}
+    iverilog = shutil.which("iverilog")
+    vvp = shutil.which("vvp")
+    if not iverilog or not vvp:
+        return {
+            "passed": True,
+            "skipped": True,
+            "report": "Simulation skipped: both iverilog and vvp are required.",
+        }
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp_path = Path(tmp_dir)
+        file_paths = []
+        for file_info in files:
+            file_path = tmp_path / Path(file_info["filename"]).name
+            file_path.write_text(file_info["content"])
+            file_paths.append(file_path)
+        simulation_path = tmp_path / "simulation.out"
+        compile_cmd = [iverilog, "-g2005", "-o", str(simulation_path)] + [
+            str(path) for path in file_paths
+        ]
+        try:
+            compile_result = subprocess.run(
+                compile_cmd, capture_output=True, text=True, timeout=timeout_seconds
+            )
+        except subprocess.TimeoutExpired:
+            return {
+                "passed": False,
+                "skipped": False,
+                "report": f"Simulation compile timed out after {timeout_seconds} seconds.",
+            }
+        compile_output = (compile_result.stdout + "\n" + compile_result.stderr).strip()
+        if compile_result.returncode != 0:
+            return {
+                "passed": False,
+                "skipped": False,
+                "report": f"Simulation compile FAIL\n{compile_output}",
+            }
+        try:
+            run_result = subprocess.run(
+                [vvp, str(simulation_path)],
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+            )
+        except subprocess.TimeoutExpired:
+            return {
+                "passed": False,
+                "skipped": False,
+                "report": f"Simulation timed out after {timeout_seconds} seconds.",
+            }
+        output = (run_result.stdout + "\n" + run_result.stderr).strip()
+        if run_result.returncode != 0 or "TEST_FAIL" in output or "TEST_PASS" not in output:
+            return {
+                "passed": False,
+                "skipped": False,
+                "report": (
+                    "Simulation FAIL: expected TEST_PASS with no TEST_FAIL marker.\n" + output
+                ).strip(),
+            }
+        return {"passed": True, "skipped": False, "report": f"Simulation PASS\n{output}"}
+
+
 # --- 4. Define Agents ---
 from verilog_agent import runtime as agent_runtime
 from verilog_agent.architecture_team import architecture_agent, architecture_review_agent
@@ -1950,7 +2212,11 @@ def architecture_review_condition(state: AgentState):
 def architecture_generation_condition(state: AgentState):
     if state.get("failed_stage") != "architecture_generation":
         return "review"
-    print("---CONDITION: Architecture generation preflight failed. Retrying Architecture Team before review without a stage retry cap.---")
+    retry_limit = state.get("max_architecture_retries", DEFAULT_MAX_RETRIES)
+    if retry_limit and state.get("architecture_retry_count", 0) >= retry_limit:
+        print("---CONDITION: Architecture generation retry threshold reached. Sending best available contract to review.---")
+        return "review"
+    print("---CONDITION: Architecture generation preflight failed. Retrying Architecture Team.---")
     return "retry"
 
 
@@ -1968,7 +2234,11 @@ def supervisor_review_condition(state: AgentState):
 def supervisor_generation_condition(state: AgentState):
     if state.get("failed_stage") != "supervisor_generation":
         return "review"
-    print("---CONDITION: Supervisor generation preflight failed. Retrying Supervisor before review without a stage retry cap.---")
+    retry_limit = state.get("max_supervisor_retries", DEFAULT_MAX_RETRIES)
+    if retry_limit and state.get("supervisor_retry_count", 0) >= retry_limit:
+        print("---CONDITION: Supervisor generation retry threshold reached. Sending best available packet to review.---")
+        return "review"
+    print("---CONDITION: Supervisor generation preflight failed. Retrying Supervisor.---")
     return "retry"
 
 
@@ -1982,7 +2252,11 @@ def control_datapath_review_condition(state: AgentState):
 def control_datapath_generation_condition(state: AgentState):
     if state.get("failed_stage") != "control_datapath_generation":
         return "review"
-    print("---CONDITION: Control/Data Path generation preflight failed. Retrying planner before review without a stage retry cap.---")
+    retry_limit = state.get("max_control_datapath_retries", DEFAULT_MAX_RETRIES)
+    if retry_limit and state.get("control_datapath_retry_count", 0) >= retry_limit:
+        print("---CONDITION: Control/Data Path generation retry threshold reached. Sending best available plan to review.---")
+        return "review"
+    print("---CONDITION: Control/Data Path generation preflight failed. Retrying planner.---")
     return "retry"
 
 
@@ -2011,7 +2285,11 @@ def next_task_condition(state: AgentState):
 def testbench_condition(state: AgentState):
     if state.get("generation_ok"):
         return "final_lint"
-    print("---CONDITION: Testbench generation needs repair. Retrying without a stage retry cap.---")
+    retry_limit = state.get("max_testbench_retries", DEFAULT_MAX_RETRIES)
+    if retry_limit and state.get("testbench_retry_count", 0) >= retry_limit:
+        print("---CONDITION: Testbench generation retry threshold reached. Continuing to final lint with best available files.---")
+        return "final_lint"
+    print("---CONDITION: Testbench generation needs repair. Retrying.---")
     return "retry"
 
 
@@ -2103,6 +2381,9 @@ def checkpoint_resume_target(completed_node: str, state: AgentState) -> str:
     if completed_node == "architecture":
         if state.get("failed_stage") != "architecture_generation":
             return "architecture_review"
+        retry_limit = state.get("max_architecture_retries", DEFAULT_MAX_RETRIES)
+        if retry_limit and state.get("architecture_retry_count", 0) >= retry_limit:
+            return "architecture_review"
         return "architecture"
     if completed_node == "architecture_review":
         if state.get("architecture_review_passed") or state.get(
@@ -2112,6 +2393,9 @@ def checkpoint_resume_target(completed_node: str, state: AgentState) -> str:
         return "architecture"
     if completed_node == "supervisor":
         if state.get("failed_stage") != "supervisor_generation":
+            return "supervisor_review"
+        retry_limit = state.get("max_supervisor_retries", DEFAULT_MAX_RETRIES)
+        if retry_limit and state.get("supervisor_retry_count", 0) >= retry_limit:
             return "supervisor_review"
         return "supervisor"
     if completed_node == "supervisor_review":
@@ -2123,6 +2407,9 @@ def checkpoint_resume_target(completed_node: str, state: AgentState) -> str:
         return "supervisor"
     if completed_node == "control_datapath_planner":
         if state.get("failed_stage") != "control_datapath_generation":
+            return "control_datapath_review"
+        retry_limit = state.get("max_control_datapath_retries", DEFAULT_MAX_RETRIES)
+        if retry_limit and state.get("control_datapath_retry_count", 0) >= retry_limit:
             return "control_datapath_review"
         return "control_datapath_planner"
     if completed_node == "control_datapath_review":
@@ -2152,7 +2439,12 @@ def checkpoint_resume_target(completed_node: str, state: AgentState) -> str:
             return "supervisor"
         return "final_lint" if state.get("skip_testbench") else "testbench_team"
     if completed_node == "testbench_team":
-        return "final_lint" if state.get("generation_ok") else "testbench_team"
+        retry_limit = state.get("max_testbench_retries", DEFAULT_MAX_RETRIES)
+        if state.get("generation_ok") or (
+            retry_limit and state.get("testbench_retry_count", 0) >= retry_limit
+        ):
+            return "final_lint"
+        return "testbench_team"
     if completed_node == "final_lint":
         if state.get("final_lint_passed") or state.get("final_lint_forced_forward"):
             return "final_review"
@@ -2377,6 +2669,7 @@ if __name__ == "__main__":
         args.llm_api_url,
         args.llm_api_key,
         args.llm_timeout,
+        args.llm_max_tokens,
     )
     active_llm_config = llm_config(
         args.llm_provider,
@@ -2385,6 +2678,7 @@ if __name__ == "__main__":
         args.llm_api_url,
         args.llm_api_key,
         args.llm_timeout,
+        args.llm_max_tokens,
     )
     if args.auto_approve:
         os.environ["AUTO_APPROVE_FINAL"] = "true"
@@ -2425,6 +2719,7 @@ if __name__ == "__main__":
         "auto_approve": args.auto_approve,
         "skip_testbench": args.no_testbench,
         "require_lint": args.require_lint,
+        "run_simulation": args.run_simulation,
         "lint_tool": discover_lint_tool(),
         "lint_timeout_seconds": args.lint_timeout,
         "allow_blackboxes": args.allow_blackboxes,
@@ -2435,6 +2730,7 @@ if __name__ == "__main__":
         "max_manager_tasks": args.max_manager_tasks,
         "fail_on_manager_fallback": args.fail_on_manager_fallback,
         "retry_limits": {
+            "manager": args.max_manager_retries,
             "architecture": args.max_architecture_retries,
             "supervisor": args.max_supervisor_retries,
             "control_datapath": args.max_control_datapath_retries,
@@ -2445,6 +2741,7 @@ if __name__ == "__main__":
         },
         "stage_retry_limits_enforced": True,
         "review_force_forward_after": {
+            "manager": args.max_manager_retries,
             "architecture": args.max_architecture_retries,
             "supervisor": args.max_supervisor_retries,
             "control_datapath": args.max_control_datapath_retries,
@@ -2471,12 +2768,16 @@ if __name__ == "__main__":
         "run_id": run_id,
         "user_request": initial_user_request,
         "manager_plan": [],
+        "manager_review_passed": False,
+        "manager_review_report": "",
+        "manager_review_retry_count": 0,
         "architecture_contract": "",
         "architecture_review_passed": False,
         "architecture_review_report": "",
         "architecture_review_forced_forward": False,
         "architecture_retry_count": 0,
         "max_architecture_retries": args.max_architecture_retries,
+        "max_manager_retries": args.max_manager_retries,
         "current_task_index": 0,
         "supervisor_plan": "",
         "supervisor_review_passed": False,
@@ -2508,6 +2809,7 @@ if __name__ == "__main__":
         "verification_report": "",
         "lint_report": "",
         "require_lint": args.require_lint,
+        "run_simulation": args.run_simulation,
         "lint_timeout_seconds": args.lint_timeout,
         "allow_blackboxes": args.allow_blackboxes,
         "llm_timeout_seconds": args.llm_timeout
@@ -2525,6 +2827,7 @@ if __name__ == "__main__":
         "failed_stage": "",
         "blocking_report": "",
         "review_feedback_log": [],
+        "forced_forward_debt": [],
         "max_generated_file_bytes": args.max_generated_file_bytes,
         "max_generated_files": args.max_generated_files,
         "max_context_chars": args.max_context_chars,
@@ -2546,11 +2849,13 @@ if __name__ == "__main__":
                 "resume_stage": str(resume_checkpoint.get("resume_stage") or ""),
                 "run_status": "running",
                 "max_architecture_retries": args.max_architecture_retries,
+                "max_manager_retries": args.max_manager_retries,
                 "max_supervisor_retries": args.max_supervisor_retries,
                 "max_control_datapath_retries": args.max_control_datapath_retries,
                 "max_testbench_retries": args.max_testbench_retries,
                 "max_retries": args.max_retries,
                 "require_lint": args.require_lint,
+                "run_simulation": args.run_simulation,
                 "lint_timeout_seconds": args.lint_timeout,
                 "allow_blackboxes": args.allow_blackboxes,
                 "llm_timeout_seconds": args.llm_timeout

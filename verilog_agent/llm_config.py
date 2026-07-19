@@ -32,6 +32,11 @@ def add_llm_arguments(parser: argparse.ArgumentParser) -> None:
         help="LLM request timeout in seconds. Set 0 to disable request timeout.",
     )
     parser.add_argument(
+        "--llm-max-tokens",
+        type=_nonnegative_int,
+        help="Maximum output tokens per LLM response. Set 0 to use the provider default.",
+    )
+    parser.add_argument(
         "--llm-api-url",
         help=(
             "OpenAI-compatible chat completions URL, for example "
@@ -68,6 +73,7 @@ def resolve_llm_settings(
     api_url: str | None = None,
     api_key: str | None = None,
     timeout_seconds: int | None = None,
+    max_tokens: int | None = None,
 ) -> Dict[str, object]:
     resolved_provider = (provider or os.getenv("LLM_PROVIDER") or "ollama").strip().lower()
     if resolved_provider not in SUPPORTED_LLM_PROVIDERS:
@@ -89,6 +95,9 @@ def resolve_llm_settings(
         timeout_seconds
         if timeout_seconds is not None
         else int(os.getenv("LLM_TIMEOUT_SECONDS", "180"))
+    )
+    resolved_max_tokens = (
+        max_tokens if max_tokens is not None else int(os.getenv("LLM_MAX_TOKENS", "8192"))
     )
 
     if resolved_provider == "gpt-oss":
@@ -117,6 +126,7 @@ def resolve_llm_settings(
         "base_url": base_url,
         "api_key": resolved_api_key,
         "timeout_seconds": resolved_timeout_seconds,
+        "max_tokens": resolved_max_tokens,
     }
 
 
@@ -135,6 +145,7 @@ def public_llm_config(settings: Dict[str, object]) -> Dict[str, object]:
         "api_key_set": bool(api_key),
         "api_key_redacted": redacted_key,
         "timeout_seconds": settings.get("timeout_seconds", ""),
+        "max_tokens": settings.get("max_tokens", ""),
     }
 
 
@@ -145,12 +156,16 @@ def create_llm(
     api_url: str | None = None,
     api_key: str | None = None,
     timeout_seconds: int | None = None,
+    max_tokens: int | None = None,
 ):
-    settings = resolve_llm_settings(provider, model, temperature, api_url, api_key, timeout_seconds)
+    settings = resolve_llm_settings(
+        provider, model, temperature, api_url, api_key, timeout_seconds, max_tokens
+    )
     backend = str(settings["backend"])
     model_name = str(settings["model"])
     resolved_temperature = float(settings["temperature"])
     resolved_timeout = int(settings.get("timeout_seconds") or 0)
+    resolved_max_tokens = int(settings.get("max_tokens") or 0)
 
     if backend in {"openai", "openai-compatible"}:
         try:
@@ -168,6 +183,8 @@ def create_llm(
         }
         if resolved_timeout > 0:
             kwargs["timeout"] = resolved_timeout
+        if resolved_max_tokens > 0:
+            kwargs["max_tokens"] = resolved_max_tokens
         if settings["base_url"]:
             kwargs["base_url"] = str(settings["base_url"])
         return ChatOpenAI(**kwargs)
@@ -184,6 +201,8 @@ def create_llm(
         print("Install project dependencies with: python3 -m pip install -r requirements.txt")
         sys.exit(1)
     kwargs = {"model": model_name, "temperature": resolved_temperature}
+    if resolved_max_tokens > 0:
+        kwargs["num_predict"] = resolved_max_tokens
     if resolved_timeout > 0:
         kwargs["client_kwargs"] = {"timeout": resolved_timeout}
         kwargs["sync_client_kwargs"] = {"timeout": resolved_timeout}
@@ -199,7 +218,10 @@ def llm_config(
     api_url: str | None = None,
     api_key: str | None = None,
     timeout_seconds: int | None = None,
+    max_tokens: int | None = None,
 ):
     return public_llm_config(
-        resolve_llm_settings(provider, model, temperature, api_url, api_key, timeout_seconds)
+        resolve_llm_settings(
+            provider, model, temperature, api_url, api_key, timeout_seconds, max_tokens
+        )
     )

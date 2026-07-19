@@ -38,22 +38,18 @@ def _render_verification_repair_packet(
     lint_report: str = "",
 ) -> str:
     task = current_manager_task(state)
-    prior_backlog = render_coding_repair_backlog(state, state.get("max_context_chars", 120_000))
     lines = [
         "Verification-to-coding repair packet:",
         f"- stage: {stage}",
         f"- task: {task.get('id', task_id)} - {task.get('title', '')}",
         "- verdict: FAIL",
         "- Coding Team must change RTL behavior or structure; comments/formatting alone are not a fix.",
-        "- Coding Team must fix both previous unresolved backlog items and the new finding in one coordinated RTL update.",
+        "- Coding Team must fix the still-observable findings listed below.",
         "- Preserve module interfaces unless this packet explicitly identifies an interface mismatch.",
         "",
         _render_candidate_summary(files),
         "",
-        "Previously unresolved coding repair backlog:",
-        prior_backlog,
-        "",
-        "New blocking verification finding:",
+        "Active blocking verification finding:",
         str(report or "Verification failed without a detailed report.").strip(),
     ]
     if lint_report:
@@ -63,7 +59,6 @@ def _render_verification_repair_packet(
             "",
             "Required coding response:",
             "- Locate the affected file/module/signal named above, or infer it from the candidate summary.",
-            "- Revisit every backlog item above and modify the RTL so the next reviewer cannot repeat it.",
             "- Modify the relevant reset, FSM, control output, handshake, datapath register, width handling, or interface code.",
             "- Return complete Verilog-2001 files for every reviewed candidate file.",
             "- Ensure the same verification finding would not be repeated on the next attempt.",
@@ -115,7 +110,12 @@ def verification_team_agent(state: AgentState):
             "verification_retry_count": next_retry_count,
             "failed_stage": "" if force_forward else "verification",
             "blocking_report": "" if force_forward else repair_packet,
-            "review_feedback_log": append_review_feedback(state, "verification", repair_packet, task_id),
+            "review_feedback_log": append_review_feedback(state, "verification", report, task_id),
+            "forced_forward_debt": (
+                append_forced_forward_debt(state, "verification", report, task_id)
+                if force_forward
+                else state.get("forced_forward_debt", [])
+            ),
         }
 
     lint_result = run_syntax_lint(
@@ -166,7 +166,12 @@ def verification_team_agent(state: AgentState):
             "failed_stage": "" if force_forward else "verification_lint",
             "blocking_report": "" if force_forward else repair_packet,
             "review_feedback_log": append_review_feedback(
-                state, "verification_lint", repair_packet, task_id
+                state, "verification_lint", report, task_id
+            ),
+            "forced_forward_debt": (
+                append_forced_forward_debt(state, "verification_lint", report, task_id)
+                if force_forward
+                else state.get("forced_forward_debt", [])
             ),
         }
 
@@ -179,7 +184,7 @@ def verification_team_agent(state: AgentState):
         candidate_summary,
     )
 
-    system_prompt = load_prompt("verification.md")
+    system_prompt = load_reviewer_prompt("verification.md")
     human_template = """
 Original user requirement:
 {user_request}
@@ -268,6 +273,17 @@ RTL candidate to verify:
             "lint_report": lint_result["report"],
             "failed_stage": "",
             "blocking_report": "",
+            "forced_forward_debt": resolve_forced_forward_debt(
+                state,
+                (
+                    "coding_format",
+                    "coding_gate_internal",
+                    "coding_preflight",
+                    "microarchitecture_review",
+                    "verification",
+                    "verification_lint",
+                ),
+            ),
             "messages": [response],
         }
 
@@ -309,8 +325,18 @@ RTL candidate to verify:
         "review_feedback_log": append_review_feedback(
             state,
             "verification",
-            repair_packet,
+            report or "Verification failed without a detailed report.",
             task_id,
+        ),
+        "forced_forward_debt": (
+            append_forced_forward_debt(
+                state,
+                "verification",
+                report or "Verification failed without a detailed report.",
+                task_id,
+            )
+            if force_forward
+            else state.get("forced_forward_debt", [])
         ),
         "messages": [response],
     }

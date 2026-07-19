@@ -82,6 +82,8 @@ class LlmConfigurationTests(unittest.TestCase):
                 "0.3",
                 "--llm-timeout",
                 "45",
+                "--llm-max-tokens",
+                "4096",
             ]
         )
 
@@ -89,6 +91,11 @@ class LlmConfigurationTests(unittest.TestCase):
         self.assertEqual(args.llm_model, "rtl-model")
         self.assertEqual(args.llm_temperature, 0.3)
         self.assertEqual(args.llm_timeout, 45)
+        self.assertEqual(args.llm_max_tokens, 4096)
+
+    def test_max_tokens_can_be_configured(self):
+        settings = resolve_llm_settings(max_tokens=4096)
+        self.assertEqual(settings["max_tokens"], 4096)
 
     def test_chat_completions_suffix_is_removed_once(self):
         self.assertEqual(

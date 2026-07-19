@@ -74,6 +74,7 @@ DASHBOARD_AUTO_APPROVE=true
 DASHBOARD_NO_TESTBENCH=false
 DASHBOARD_REQUIRE_LINT=false
 MAX_RETRIES=3
+# DASHBOARD_MAX_MANAGER_RETRIES=3
 # DASHBOARD_MAX_RETRIES=3
 # DASHBOARD_MAX_ARCHITECTURE_RETRIES=3
 # DASHBOARD_MAX_SUPERVISOR_RETRIES=3
@@ -109,6 +110,7 @@ LLM_PROVIDER=openai
 OPENAI_MODEL=gpt-4.1
 OPENAI_API_KEY=YOUR_OPENAI_API_KEY
 LLM_TEMPERATURE=0.1
+LLM_MAX_TOKENS=8192
 ```
 
 ## gpt-oss run
@@ -157,6 +159,7 @@ Options:
 - `--continue`: Continue from `<artifact-dir>/run_state_checkpoint.json` instead of starting a new run.
 - `--auto-approve`: Skip the final manual approval prompt.
 - `--max-retries`: Maximum retries per coding, microarchitecture review, and verification stage. Defaults to `MAX_RETRIES` or `3`.
+- `--max-manager-retries`: Maximum Manager semantic review/repair attempts. Override with `MAX_MANAGER_RETRIES`.
 - `--max-architecture-retries`: Maximum architecture review retries. Override with `MAX_ARCHITECTURE_RETRIES`.
 - `--max-supervisor-retries`: Maximum Supervisor review retries. Override with `MAX_SUPERVISOR_RETRIES`.
 - `--max-control-datapath-retries`: Maximum Control/Data Path plan review retries. Override with `MAX_CONTROL_DATAPATH_RETRIES`.
@@ -174,6 +177,8 @@ Options:
 - `--artifact-dir`: Directory for generated artifacts and logs.
 - `--llm-provider`: `ollama`, `gpt-oss`, or `openai`.
 - `--llm-model`: Model name such as `gpt-4.1`, `gpt-oss`, `gpt-oss:20b`, `gpt-oss:120b`, or another Ollama model.
+- `--llm-max-tokens`: Maximum output tokens per response. Override with `LLM_MAX_TOKENS`; the default is `8192`.
+- `--run-simulation`: Execute the generated self-checking testbench with `iverilog/vvp`. Disabled by default; enable with `RUN_SIMULATION=true` or `DASHBOARD_RUN_SIMULATION=true` for dashboard runs.
 - `--llm-temperature`: Model temperature.
 - `--llm-api-url`: OpenAI-compatible chat completions URL.
 - `--llm-api-key`: API key for OpenAI or the remote endpoint. The saved config redacts it.

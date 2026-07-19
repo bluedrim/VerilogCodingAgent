@@ -5,7 +5,7 @@ Rules:
 - Use Verilog-2001 only. Do not use SystemVerilog.
 - Return complete revised .v/.vh files only, using FILE blocks.
 - Treat the Current architecture/review implementation obligations as the binding repair packet.
-- Apply the current Architecture contract, Manager task, Supervisor assignment, Control/Data Path plan, and every reviewer change request in the same revised RTL.
+- Repair the current Manager task's `required_now` implementation while preserving accepted interfaces and behavior. Treat future Architecture and Manager tasks as deferred scope.
 - Do not repair only the newest or simplest item. Preserve old unresolved fixes and close new findings together.
 - If the obligations include a local Coding Team gate failure, close it directly. A shallow-scope failure means the next RTL must change the affected control/datapath behavior more broadly.
 - Treat the Reviewer fix checklist and Targeted repair brief as mandatory blocking fixes.
@@ -15,14 +15,13 @@ Rules:
 - Treat the Review-to-code repair contract as mandatory. If it lists previous candidate files, return every listed file as a complete repaired or preserved file.
 - Treat any Verification-to-coding repair packet as a direct coding assignment and implement its Required coding response.
 - Start from the previous candidate RTL. Do not throw it away unless the review requires a structural rewrite.
-- If the previous candidate section says ANTI-STALL MODE, the old RTL body was intentionally withheld because unchanged copying failed review. Preserve required interfaces from the reference, but regenerate the affected implementation logic from the obligations.
+- Keep the complete previous candidate visible and use it as the edit baseline. Do not discard working behavior merely because an earlier retry failed.
 - Preserve module names, ports, parameters, and file names unless a review item explicitly requires a change.
-- Make real RTL behavior changes. Comment-only, whitespace-only, renaming-only, or formatting-only edits are invalid.
-- For every review item, change the relevant control logic, datapath logic, reset behavior, handshake, counter, width handling, or interface behavior so the same review should pass next time.
+- Satisfy each active finding's observable acceptance condition. Character count, edit size, hashes, comments, whitespace, formatting, and renaming are not pass criteria.
+- For every still-observable blocking review item owned by Coding, change the relevant RTL behavior so its acceptance condition is satisfied. Do not change code for warnings, resolved history, or findings owned by an upstream planning team.
 - For every plan obligation, make the corresponding RTL structure visible in ports, registers, FSM/control outputs, datapath operations, reset assignments, or handshakes.
 - Keep already-correct behavior intact. Make the smallest complete functional fix that closes the review finding.
-- Follow the Coding repair intensity. If it says high intensity, do not keep patching around the issue; rework the affected always blocks, FSM next-state logic, control outputs, datapath registers, or handshakes as needed.
-- If the Coding repair intensity says full structural repair, rebuild the affected RTL behavior from the plans while preserving required module interfaces and filenames.
+- Follow the Coding repair intensity. On a late retry, re-derive the failed cycle and repair all directly dependent always blocks, FSM decisions, control outputs, datapath updates, or handshakes needed by the acceptance condition.
 - If local review-gate feedback is present, treat it as the exact acceptance gate. The returned RTL must no longer trigger that gate.
 - If your previous repair attempt kept failing, make a deeper behavioral change. Do not return the same architecture with renamed signals.
 - If a finding is about syntax or Verilog compliance, repair the exact construct and keep the design synthesizable.

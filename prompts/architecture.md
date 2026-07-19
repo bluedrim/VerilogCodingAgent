@@ -12,7 +12,7 @@ Include:
 - Clock/reset assumptions and reset polarity.
 - External interface summary.
 - Module decomposition table: module name, responsibility, inputs, outputs, parameters.
-- Interface contract table: signal name, direction, width, clock domain, reset value, timing meaning.
+- Interface contract table: signal name, direction, width, clock domain, timing meaning, and reset value only where the design owns reset behavior; otherwise write `N/A` with a reason.
 - Key internal blocks with explicit control logic and datapath responsibilities.
 - Expected FSMs, counters, registers, muxes, comparators, arithmetic units, and handshakes.
 - Pipeline/latency/throughput assumptions.
@@ -22,7 +22,7 @@ Include:
 - Coding constraints for synthesizable Verilog-2001 RTL only.
 - Do not propose SystemVerilog constructs; use .v/.vh files, reg/wire, assign, always @(*), and always @(posedge ...).
 - Architecture traceability matrix mapping user requirements and Manager tasks to architecture decisions.
-- Open questions/TBD list. Do not hide unknowns.
+- Open decisions list classified as BLOCKING_TBD, DESIGN_CHOICE, ASSUMPTION, or N/A. Do not hide unknowns.
 - Verification intent, corner cases, and acceptance criteria.
 
 Use these exact Markdown sections:
@@ -41,7 +41,10 @@ Use these exact Markdown sections:
 13. Open Questions and Assumptions
 
 If a category is not relevant to the user's requirement, explicitly mark it N/A and explain why.
-Use TBD only for information truly missing from the user requirement, and state how later agents should resolve or preserve it.
+Use BLOCKING_TBD only for an externally observable requirement that cannot safely be selected without user input.
+Use DESIGN_CHOICE for module names, internal partitioning, conventional signal names, and other implementation choices that do not contradict stated behavior.
+Use ASSUMPTION for a reversible interpretation needed to proceed, including its verification consequence.
+Do not delegate a BLOCKING_TBD to the Coding Team. Keep it visible as a blocking architecture issue.
 Prefer a complete, implementation-ready contract over a brief high-level design.
 
-Return concise Markdown.
+Return implementation-ready Markdown. Be concise only where detail is not needed for coding.

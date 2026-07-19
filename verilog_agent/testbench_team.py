@@ -201,19 +201,37 @@ def final_lint_agent(state: AgentState):
         state.get("require_lint", False),
         state.get("lint_timeout_seconds", 30),
     )
-    write_text_artifact("logs/final_lint_report.txt", lint_result["report"])
-    if lint_result["passed"]:
+    simulation_result = {
+        "passed": True,
+        "skipped": True,
+        "report": "Simulation disabled. Enable --run-simulation or RUN_SIMULATION=true to execute iverilog/vvp.",
+    }
+    if (
+        lint_result["passed"]
+        and state.get("testbench_files")
+        and state.get("run_simulation", False)
+    ):
+        simulation_result = run_testbench_simulation(
+            all_files, state.get("lint_timeout_seconds", 30)
+        )
+    combined_report = (
+        f"{lint_result['report']}\n\n{simulation_result['report']}"
+        if state.get("testbench_files")
+        else lint_result["report"]
+    )
+    write_text_artifact("logs/final_lint_report.txt", combined_report)
+    if lint_result["passed"] and simulation_result["passed"]:
         return {
             "final_lint_passed": True,
             "final_lint_forced_forward": False,
-            "final_lint_report": lint_result["report"],
+            "final_lint_report": combined_report,
             "failed_stage": "",
             "blocking_report": "",
         }
     next_retry_count = state.get("testbench_retry_count", 0) + 1
     force_forward_after = state.get("max_testbench_retries", DEFAULT_MAX_RETRIES)
     force_forward = bool(force_forward_after and next_retry_count >= force_forward_after)
-    report = lint_result["report"]
+    report = combined_report
     if force_forward:
         print("---FINAL LINT: FORCE-FORWARD THRESHOLD REACHED---")
         report = (
