@@ -317,16 +317,6 @@
     .panel-heading h2 {
       margin: 0;
     }
-    .console-pane {
-      height: 420px;
-      max-height: 520px;
-      white-space: pre;
-      word-break: normal;
-      color: #dce7f2;
-      background: #111820;
-      border-color: #2a3948;
-      scrollbar-color: #63788d #111820;
-    }
     .report-grid {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -442,13 +432,6 @@
       </div>
     </section>
     <section class="panel" style="margin-top:12px;">
-      <div class="panel-heading">
-        <h2>main.py Console Output</h2>
-        <span id="consoleStatus" class="pill info">No log</span>
-      </div>
-      <pre id="consoleOutput" class="console-pane">Start or select a run to view main.py print output.</pre>
-    </section>
-    <section class="panel" style="margin-top:12px;">
       <h2>Stage Reports</h2>
       <div class="report-grid" id="reports"></div>
     </section>
@@ -476,15 +459,13 @@
     </section>
   </main>
   <script>
-    const state = { runs: [], selected: "", timer: null, lastRun: null, consoleRun: "" };
+    const state = { runs: [], selected: "", timer: null, lastRun: null };
     const runSelect = document.getElementById("runSelect");
     const subtitle = document.getElementById("subtitle");
     const metrics = document.getElementById("metrics");
     const pipeline = document.getElementById("pipeline");
     const reports = document.getElementById("reports");
     const latestReport = document.getElementById("latestReport");
-    const consoleOutput = document.getElementById("consoleOutput");
-    const consoleStatus = document.getElementById("consoleStatus");
     const artifactList = document.getElementById("artifactList");
     const failedList = document.getElementById("failedList");
     const filePreview = document.getElementById("filePreview");
@@ -675,10 +656,6 @@
       artifactList.innerHTML = '<div class="empty">No artifacts.</div>';
       failedList.innerHTML = '<div class="empty">No failed attempts.</div>';
       latestReport.textContent = "No run selected.";
-      consoleOutput.textContent = "Start or select a run to view main.py print output.";
-      consoleStatus.className = "pill info";
-      consoleStatus.textContent = "No log";
-      state.consoleRun = "";
       filePreview.textContent = "Select a recent artifact to preview it.";
       failedPreview.textContent = "Select a failed attempt to preview it.";
       continueBtn.disabled = true;
@@ -711,29 +688,9 @@
       pipeline.innerHTML = (run.stages || []).map(stageHtml).join("");
       renderReports(run);
       latestReport.textContent = run.latest_report || "No report yet.";
-      renderConsole(run);
       artifactList.innerHTML = tableFor(run.recent_artifacts || [], "artifact");
       failedList.innerHTML = tableFor(run.failed_attempts || [], "failed");
       bindFileLinks();
-    }
-
-    function renderConsole(run) {
-      const switchingRun = state.consoleRun !== run.name;
-      const distanceFromBottom = consoleOutput.scrollHeight - consoleOutput.scrollTop - consoleOutput.clientHeight;
-      const shouldFollow = switchingRun || distanceFromBottom < 48;
-      const output = run.console_output || "Waiting for main.py output...";
-      if (consoleOutput.textContent !== output) {
-        consoleOutput.textContent = output;
-      }
-      state.consoleRun = run.name;
-      consoleStatus.className = `pill ${run.active ? "warn" : "info"}`;
-      const tailText = run.console_truncated ? " | latest 500 KB" : "";
-      consoleStatus.textContent = `${run.active ? "Live" : "Stopped"} | ${run.console_size_display || "0 B"}${tailText}`;
-      if (shouldFollow) {
-        requestAnimationFrame(() => {
-          consoleOutput.scrollTop = consoleOutput.scrollHeight;
-        });
-      }
     }
 
     function metric(label, value, sub) {

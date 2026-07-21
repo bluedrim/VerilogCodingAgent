@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -49,6 +50,17 @@ class ContinuationRoutingTests(unittest.TestCase):
         }
         self.assertEqual(main.checkpoint_resume_target("summary", state), "")
 
+    def test_final_lint_failure_resumes_final_lint_when_testbench_is_disabled(self):
+        state = {
+            **self.base_state,
+            "failed_stage": "final_lint",
+            "skip_testbench": True,
+        }
+        self.assertEqual(
+            main.checkpoint_resume_target("summary", state),
+            "final_lint",
+        )
+
 
 class CheckpointPersistenceTests(unittest.TestCase):
     def test_messages_round_trip_through_checkpoint(self):
@@ -73,6 +85,85 @@ class CheckpointPersistenceTests(unittest.TestCase):
             [message.content for message in restored["messages"]],
             ["counter requirement", "counter plan"],
         )
+
+    def test_continuation_restores_original_execution_settings(self):
+        args = main.build_arg_parser().parse_args(["--continue", "--artifact-dir", "output_x"])
+        execution = {
+            "auto_approve": True,
+            "skip_testbench": True,
+            "require_lint": True,
+            "run_simulation": True,
+            "max_context_chars": 64000,
+            "retry_limits": {
+                "manager": 4,
+                "architecture": 5,
+                "supervisor": 6,
+                "control_datapath": 7,
+                "coding": 8,
+                "testbench": 9,
+            },
+            "llm_config": {
+                "provider": "gpt-oss",
+                "model": "custom-rtl-model",
+                "temperature": 0.2,
+                "api_url": "http://abc.net:30001/chat/completions",
+                "timeout_seconds": 240,
+                "max_tokens": 16000,
+            },
+        }
+
+        main.apply_continuation_settings(
+            args,
+            execution,
+            ["--continue", "--artifact-dir", "output_x"],
+        )
+
+        self.assertTrue(args.auto_approve)
+        self.assertTrue(args.no_testbench)
+        self.assertTrue(args.require_lint)
+        self.assertTrue(args.run_simulation)
+        self.assertEqual(args.max_retries, 8)
+        self.assertEqual(args.max_manager_retries, 4)
+        self.assertEqual(args.max_testbench_retries, 9)
+        self.assertEqual(args.max_context_chars, 64000)
+        self.assertEqual(args.llm_provider, "gpt-oss")
+        self.assertEqual(args.llm_model, "custom-rtl-model")
+        self.assertEqual(args.llm_api_url, "http://abc.net:30001/chat/completions")
+        self.assertEqual(args.llm_max_tokens, 16000)
+
+    def test_explicit_continue_provider_does_not_reuse_incompatible_model(self):
+        args = main.build_arg_parser().parse_args(
+            [
+                "--continue",
+                "--artifact-dir",
+                "output_x",
+                "--llm-provider",
+                "openai",
+            ]
+        )
+        execution = {
+            "llm_config": {
+                "provider": "gpt-oss",
+                "model": "gpt-oss:20b",
+                "api_url": "http://old-endpoint/chat/completions",
+            }
+        }
+
+        main.apply_continuation_settings(
+            args,
+            execution,
+            [
+                "--continue",
+                "--artifact-dir",
+                "output_x",
+                "--llm-provider",
+                "openai",
+            ],
+        )
+
+        self.assertEqual(args.llm_provider, "openai")
+        self.assertIsNone(args.llm_model)
+        self.assertIsNone(args.llm_api_url)
 
 
 class DashboardContinuationTests(unittest.TestCase):
@@ -115,12 +206,13 @@ class DashboardContinuationTests(unittest.TestCase):
         self.assertIn('class="report-body"', html)
         self.assertNotIn("<p>${escapeHtml(text || \"-\")}</p>", html)
 
-    def test_dashboard_html_displays_live_main_console_output(self):
+    def test_dashboard_html_omits_main_console_output(self):
         html = dashboard.load_dashboard_html()
-        self.assertIn('id="consoleOutput" class="console-pane"', html)
-        self.assertIn('id="consoleStatus" class="pill info"', html)
-        self.assertIn("function renderConsole(run)", html)
-        self.assertIn("run.console_output", html)
+        self.assertNotIn("main.py Console Output", html)
+        self.assertNotIn('id="consoleOutput"', html)
+        self.assertNotIn('id="consoleStatus"', html)
+        self.assertNotIn("function renderConsole(run)", html)
+        self.assertNotIn("run.console_output", html)
 
     def test_pid_probe_falls_back_when_wnohang_is_unavailable(self):
         with (
@@ -385,7 +477,7 @@ class DashboardContinuationTests(unittest.TestCase):
         self.assertEqual(summary["started_at"], "2026-07-14T01:00:00+00:00")
         self.assertEqual(summary["ended_at"], "2026-07-14T01:02:05+00:00")
 
-    def test_dashboard_summary_includes_main_console_tail(self):
+    def test_dashboard_summary_omits_main_console_tail(self):
         with tempfile.TemporaryDirectory(prefix="verilog_dashboard_console_") as tmp_dir:
             root = Path(tmp_dir)
             run_dir = root / "output_counter_20260714_151000"
@@ -401,23 +493,10 @@ class DashboardContinuationTests(unittest.TestCase):
 
             summary = dashboard.build_run_summary(root, run_dir)
 
-        self.assertEqual(summary["stdout_log"], "dashboard_stdout.log")
-        self.assertIn("---MANAGER: Planning---", summary["console_output"])
-        self.assertIn("---VERILOG CODING TEAM: Implementing T1---", summary["console_output"])
-        self.assertFalse(summary["console_truncated"])
-        self.assertGreater(summary["console_bytes"], 0)
-
-    def test_console_tail_marks_omitted_earlier_output(self):
-        with tempfile.TemporaryDirectory(prefix="verilog_dashboard_console_tail_") as tmp_dir:
-            path = Path(tmp_dir) / "dashboard_stdout.log"
-            path.write_text("first line\nsecond line\nthird line\n", encoding="utf-8")
-
-            output, truncated, size = dashboard.tail_text_read(path, 18)
-
-        self.assertTrue(truncated)
-        self.assertIn("Earlier console output omitted", output)
-        self.assertIn("third line", output)
-        self.assertEqual(size, len("first line\nsecond line\nthird line\n".encode()))
+        self.assertNotIn("stdout_log", summary)
+        self.assertNotIn("console_output", summary)
+        self.assertNotIn("console_truncated", summary)
+        self.assertNotIn("console_bytes", summary)
 
     def test_dashboard_stop_marks_project_stopped_and_keeps_continue_checkpoint(self):
         with tempfile.TemporaryDirectory(prefix="verilog_dashboard_stop_") as tmp_dir:
@@ -522,6 +601,82 @@ class DashboardContinuationTests(unittest.TestCase):
         self.assertEqual(job["stopped_at"], "")
         self.assertEqual(job["options"]["llm_provider"], "gpt-oss")
         self.assertEqual(job["continuation_count"], 1)
+
+    def test_dashboard_default_continue_preserves_saved_options_and_llm(self):
+        with tempfile.TemporaryDirectory(prefix="verilog_dashboard_saved_continue_") as tmp_dir:
+            root = Path(tmp_dir)
+            run_dir = root / "output_counter_20260713_130000"
+            run_dir.mkdir()
+            (root / "main.py").write_text("print('stub')\n", encoding="utf-8")
+            (run_dir / "run_state_checkpoint.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "phase": "after",
+                        "resume_stage": "verification_team",
+                        "state": {},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (run_dir / "execution_config.json").write_text(
+                json.dumps(
+                    {
+                        "auto_approve": False,
+                        "skip_testbench": True,
+                        "require_lint": True,
+                        "max_manager_tasks": 48,
+                        "retry_limits": {
+                            "manager": 4,
+                            "architecture": 5,
+                            "supervisor": 6,
+                            "control_datapath": 7,
+                            "coding": 8,
+                            "testbench": 9,
+                        },
+                        "llm_config": {
+                            "provider": "gpt-oss",
+                            "model": "saved-model",
+                            "api_url": "http://saved/chat/completions",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            captured = {}
+
+            class FakeProcess:
+                pid = 434343
+
+            def fake_popen(command, **kwargs):
+                captured["command"] = command
+                return FakeProcess()
+
+            with (
+                patch.dict(os.environ, {}, clear=True),
+                patch.object(dashboard.subprocess, "Popen", side_effect=fake_popen),
+            ):
+                result = dashboard.continue_agent_run(
+                    root,
+                    {"dir": run_dir.name, "llmProvider": ""},
+                )
+
+            job = json.loads((run_dir / "dashboard_job.json").read_text(encoding="utf-8"))
+
+        command = captured["command"]
+        self.assertNotIn("--llm-provider", command)
+        self.assertNotIn("--auto-approve", command)
+        self.assertIn("--no-auto-approve", command)
+        self.assertIn("--no-testbench", command)
+        self.assertIn("--require-lint", command)
+        self.assertIn("--no-run-simulation", command)
+        self.assertEqual(command[command.index("--max-retries") + 1], "8")
+        self.assertEqual(command[command.index("--max-manager-retries") + 1], "4")
+        self.assertEqual(command[command.index("--max-testbench-retries") + 1], "9")
+        self.assertEqual(command[command.index("--max-manager-tasks") + 1], "48")
+        self.assertEqual(result["resume_stage"], "verification_team")
+        self.assertEqual(job["options"]["llm_provider"], "gpt-oss")
+        self.assertFalse(job["options"]["llm_provider_overridden"])
 
 
 if __name__ == "__main__":

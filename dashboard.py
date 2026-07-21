@@ -24,7 +24,6 @@ except ModuleNotFoundError:  # pragma: no cover - dashboard still works without 
 
 ROOT = Path(__file__).resolve().parent
 MAX_FILE_PREVIEW_BYTES = 1_000_000
-MAX_CONSOLE_PREVIEW_BYTES = 500_000
 MAX_START_PAYLOAD_BYTES = 1_000_000
 MAX_SPEC_CHARS = 500_000
 CLIENT_DISCONNECT_ERRNOS = {53, 54, 10053, 10054}
@@ -123,28 +122,6 @@ def text_read(path: Path, limit: int = MAX_FILE_PREVIEW_BYTES) -> str:
     except OSError as exc:
         return f"Could not read file: {exc}"
     return data.decode("utf-8", errors="replace")
-
-
-def tail_text_read(path: Path, limit: int = MAX_CONSOLE_PREVIEW_BYTES) -> tuple[str, bool, int]:
-    try:
-        size = path.stat().st_size
-        start = max(size - max(limit, 1), 0)
-        with path.open("rb") as handle:
-            handle.seek(start)
-            data = handle.read(max(limit, 1))
-    except FileNotFoundError:
-        return "", False, 0
-    except OSError as exc:
-        return f"Could not read console log: {exc}", False, 0
-
-    truncated = start > 0
-    if truncated:
-        newline = data.find(b"\n")
-        if newline >= 0:
-            data = data[newline + 1 :]
-        prefix = b"[Earlier console output omitted from dashboard preview]\n"
-        data = prefix + data
-    return data.decode("utf-8", errors="replace"), truncated, size
 
 
 def iso_from_mtime(path: Path) -> str:
@@ -405,6 +382,20 @@ def first_int(default: int, *values: object) -> int:
             return int(value)
         except (TypeError, ValueError):
             continue
+    return default
+
+
+def first_bool(default: bool, *values: object) -> bool:
+    for value in values:
+        if isinstance(value, bool):
+            return value
+        if value in {None, ""}:
+            continue
+        normalized = str(value).strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
     return default
 
 
@@ -683,8 +674,6 @@ def build_run_summary(root: Path, run_dir: Path) -> dict:
     )
     last_artifact = heartbeat.get("last_artifact") or (artifacts[0]["path"] if artifacts else "")
     last_reports = collect_stage_reports(run_dir, snapshot, summary, checkpoint, artifacts)
-    stdout_log = Path(str(job.get("stdout_log") or "dashboard_stdout.log")).name
-    console_output, console_truncated, console_bytes = tail_text_read(run_dir / stdout_log)
     return {
         "name": run_dir.name,
         "path": str(run_dir.relative_to(root)),
@@ -721,11 +710,6 @@ def build_run_summary(root: Path, run_dir: Path) -> dict:
         "stages": build_stages(snapshot, summary, artifacts, checkpoint, execution, job),
         "last_reports": last_reports,
         "latest_report": infer_latest_report(run_dir, summary, snapshot, failed or artifacts),
-        "stdout_log": stdout_log,
-        "console_output": console_output,
-        "console_truncated": console_truncated,
-        "console_bytes": console_bytes,
-        "console_size_display": human_size(console_bytes),
         "recent_artifacts": artifacts,
         "failed_attempts": failed,
     }
@@ -1110,38 +1094,80 @@ def continue_agent_run(root: Path, payload: dict) -> dict:
     if run_process_is_active(run_dir, heartbeat):
         raise ValueError("The selected run is already active.")
 
-    max_retries = env_int(("DASHBOARD_MAX_RETRIES", "MAX_RETRIES"), 3, 0, 999)
+    execution = json_read(run_dir / "execution_config.json", {}) or {}
+    previous_job = json_read(run_dir / "dashboard_job.json", {}) or {}
+    retry_limits = nested_dict(execution, "retry_limits")
+    previous_options = nested_dict(previous_job, "options")
+    previous_llm = nested_dict(execution, "llm_config")
+
+    saved_max_retries = first_int(
+        3,
+        previous_options.get("max_retries"),
+        retry_limits.get("coding"),
+    )
+    max_retries = env_int(
+        ("DASHBOARD_MAX_RETRIES",), saved_max_retries, 0, 999
+    )
     max_manager_retries = env_int(
-        ("DASHBOARD_MAX_MANAGER_RETRIES", "MAX_MANAGER_RETRIES"),
-        max_retries,
+        ("DASHBOARD_MAX_MANAGER_RETRIES",),
+        first_int(
+            max_retries,
+            previous_options.get("max_manager_retries"),
+            retry_limits.get("manager"),
+        ),
         0,
         999,
     )
     max_architecture_retries = env_int(
-        ("DASHBOARD_MAX_ARCHITECTURE_RETRIES", "MAX_ARCHITECTURE_RETRIES"),
-        max_retries,
+        ("DASHBOARD_MAX_ARCHITECTURE_RETRIES",),
+        first_int(
+            max_retries,
+            previous_options.get("max_architecture_retries"),
+            retry_limits.get("architecture"),
+        ),
         0,
         999,
     )
     max_supervisor_retries = env_int(
-        ("DASHBOARD_MAX_SUPERVISOR_RETRIES", "MAX_SUPERVISOR_RETRIES"),
-        max_retries,
+        ("DASHBOARD_MAX_SUPERVISOR_RETRIES",),
+        first_int(
+            max_retries,
+            previous_options.get("max_supervisor_retries"),
+            retry_limits.get("supervisor"),
+        ),
         0,
         999,
     )
     max_control_datapath_retries = env_int(
-        ("DASHBOARD_MAX_CONTROL_DATAPATH_RETRIES", "MAX_CONTROL_DATAPATH_RETRIES"),
-        max_retries,
+        ("DASHBOARD_MAX_CONTROL_DATAPATH_RETRIES",),
+        first_int(
+            max_retries,
+            previous_options.get("max_control_datapath_retries"),
+            retry_limits.get("control_datapath"),
+        ),
         0,
         999,
     )
     max_testbench_retries = env_int(
-        ("DASHBOARD_MAX_TESTBENCH_RETRIES", "MAX_TESTBENCH_RETRIES"),
-        max_retries,
+        ("DASHBOARD_MAX_TESTBENCH_RETRIES",),
+        first_int(
+            max_retries,
+            previous_options.get("max_testbench_retries"),
+            retry_limits.get("testbench"),
+        ),
         0,
         999,
     )
-    max_tasks = env_int(("DASHBOARD_MAX_MANAGER_TASKS", "MAX_MANAGER_TASKS"), 32, 1, 128)
+    max_tasks = env_int(
+        ("DASHBOARD_MAX_MANAGER_TASKS",),
+        first_int(
+            32,
+            previous_options.get("max_manager_tasks"),
+            execution.get("max_manager_tasks"),
+        ),
+        1,
+        128,
+    )
     command = [
         sys.executable,
         str(root / "main.py"),
@@ -1164,28 +1190,40 @@ def continue_agent_run(root: Path, payload: dict) -> dict:
         str(max_tasks),
     ]
 
-    auto_approve = env_bool(("DASHBOARD_AUTO_APPROVE", "AUTO_APPROVE_FINAL"), True)
-    no_testbench = env_bool(("DASHBOARD_NO_TESTBENCH", "NO_TESTBENCH"), False)
-    require_lint = env_bool(("DASHBOARD_REQUIRE_LINT", "REQUIRE_LINT"), False)
-    run_simulation = env_bool(("DASHBOARD_RUN_SIMULATION", "RUN_SIMULATION"), False)
-    if auto_approve:
-        command.append("--auto-approve")
-    if no_testbench:
-        command.append("--no-testbench")
-    if require_lint:
-        command.append("--require-lint")
-    if run_simulation:
-        command.append("--run-simulation")
+    auto_approve = env_bool(
+        ("DASHBOARD_AUTO_APPROVE",),
+        first_bool(True, previous_options.get("auto_approve"), execution.get("auto_approve")),
+    )
+    no_testbench = env_bool(
+        ("DASHBOARD_NO_TESTBENCH",),
+        first_bool(False, previous_options.get("no_testbench"), execution.get("skip_testbench")),
+    )
+    require_lint = env_bool(
+        ("DASHBOARD_REQUIRE_LINT",),
+        first_bool(False, previous_options.get("require_lint"), execution.get("require_lint")),
+    )
+    run_simulation = env_bool(
+        ("DASHBOARD_RUN_SIMULATION",),
+        first_bool(False, previous_options.get("run_simulation"), execution.get("run_simulation")),
+    )
+    command.append("--auto-approve" if auto_approve else "--no-auto-approve")
+    command.append("--no-testbench" if no_testbench else "--testbench")
+    command.append("--require-lint" if require_lint else "--no-require-lint")
+    command.append("--run-simulation" if run_simulation else "--no-run-simulation")
 
-    llm_provider = str(payload.get("llmProvider") or "").strip()
-    if llm_provider:
-        command.extend(["--llm-provider", llm_provider])
+    selected_llm_provider = str(payload.get("llmProvider") or "").strip()
+    effective_llm_provider = (
+        selected_llm_provider
+        or str(previous_options.get("llm_provider") or "").strip()
+        or str(previous_llm.get("provider") or "").strip()
+    )
+    if selected_llm_provider:
+        command.extend(["--llm-provider", selected_llm_provider])
 
     stdout_path = run_dir / "dashboard_stdout.log"
     process = launch_agent_process(command, root, stdout_path, os.environ.copy())
 
     started_at = datetime.now(timezone.utc).isoformat()
-    previous_job = json_read(run_dir / "dashboard_job.json", {}) or {}
     continuation_event = {
         "pid": process.pid,
         "started_at": started_at,
@@ -1223,7 +1261,8 @@ def continue_agent_run(root: Path, payload: dict) -> dict:
                 "max_control_datapath_retries": max_control_datapath_retries,
                 "max_testbench_retries": max_testbench_retries,
                 "max_manager_tasks": max_tasks,
-                "llm_provider": llm_provider,
+                "llm_provider": effective_llm_provider,
+                "llm_provider_overridden": bool(selected_llm_provider),
             },
         }
     )

@@ -20,10 +20,13 @@ Open `http://localhost:8766` to start a new run from typed requirements or a
 Markdown file. The dashboard only exposes LLM provider selection; model names,
 run policy, retry limits, API URLs, and keys are read from `.env`. After launch
 it monitors current run status, retry counts, force-forward flags, recent logs,
-failed attempts, generated artifacts, and live `main.py` console output. Select
+failed attempts, and generated artifacts. Select
 an interrupted or stopped output directory and use `Continue task` to resume
 from its latest saved pipeline checkpoint. `Stop task` terminates a live agent
-or marks a stale run stopped while preserving that checkpoint.
+or marks a stale run stopped while preserving that checkpoint. Continuation
+also restores the run's saved LLM model/API URL, retry limits, lint policy, and
+testbench policy. Selecting a different LLM provider in the dashboard overrides
+the saved LLM settings and uses that provider's current `.env` configuration.
 
 ## RTL DataPath Visualizer
 

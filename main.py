@@ -134,14 +134,35 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Skip final interactive approval and write generated files.",
     )
     parser.add_argument(
+        "--no-auto-approve",
+        dest="auto_approve",
+        action="store_false",
+        default=argparse.SUPPRESS,
+        help="Require final interactive approval, overriding a continued run setting.",
+    )
+    parser.add_argument(
         "--no-testbench",
         action="store_true",
         help="Skip smoke testbench generation.",
     )
     parser.add_argument(
+        "--testbench",
+        dest="no_testbench",
+        action="store_false",
+        default=argparse.SUPPRESS,
+        help="Enable smoke testbench generation, overriding a continued run setting.",
+    )
+    parser.add_argument(
         "--require-lint",
         action="store_true",
         help="Fail when neither verilator nor iverilog is installed.",
+    )
+    parser.add_argument(
+        "--no-require-lint",
+        dest="require_lint",
+        action="store_false",
+        default=argparse.SUPPRESS,
+        help="Allow lint to be skipped when no external lint tool is installed.",
     )
     parser.add_argument(
         "--run-simulation",
@@ -153,6 +174,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--no-run-simulation",
+        dest="run_simulation",
+        action="store_false",
+        default=argparse.SUPPRESS,
+        help="Disable testbench simulation, overriding a continued run setting.",
+    )
+    parser.add_argument(
         "--lint-timeout",
         type=positive_int,
         default=30,
@@ -162,6 +190,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--allow-blackboxes",
         action="store_true",
         help="Allow unresolved module instantiations in static sanity checks.",
+    )
+    parser.add_argument(
+        "--disallow-blackboxes",
+        dest="allow_blackboxes",
+        action="store_false",
+        default=argparse.SUPPRESS,
+        help="Reject unresolved module instantiations, overriding a continued run setting.",
     )
     parser.add_argument(
         "--max-generated-file-bytes",
@@ -1669,6 +1704,128 @@ def read_run_checkpoint(artifact_dir: Path) -> tuple[Dict[str, object], Dict[str
     return _checkpoint_state_from_json(payload.get("state")), payload
 
 
+def _command_option_present(argv: List[str], option: str) -> bool:
+    return any(argument == option or argument.startswith(option + "=") for argument in argv)
+
+
+def apply_continuation_settings(
+    args: argparse.Namespace,
+    execution_config: Dict[str, object],
+    argv: Optional[List[str]] = None,
+) -> argparse.Namespace:
+    """Restore the original run settings unless this continuation overrides them."""
+    argv = list(sys.argv[1:] if argv is None else argv)
+    retry_limits = execution_config.get("retry_limits", {})
+    if not isinstance(retry_limits, dict):
+        retry_limits = {}
+    llm_settings = execution_config.get("llm_config", {})
+    if not isinstance(llm_settings, dict):
+        llm_settings = {}
+
+    def restore(name: str, option: str | tuple[str, ...], value: object) -> None:
+        options = (option,) if isinstance(option, str) else option
+        if any(_command_option_present(argv, item) for item in options) or value in {None, ""}:
+            return
+        setattr(args, name, value)
+
+    saved_max_retries = retry_limits.get("coding", execution_config.get("max_retries"))
+    restore("max_retries", "--max-retries", saved_max_retries)
+    restore(
+        "max_manager_retries",
+        "--max-manager-retries",
+        retry_limits.get("manager", saved_max_retries),
+    )
+    restore(
+        "max_architecture_retries",
+        "--max-architecture-retries",
+        retry_limits.get("architecture"),
+    )
+    restore(
+        "max_supervisor_retries",
+        "--max-supervisor-retries",
+        retry_limits.get("supervisor"),
+    )
+    restore(
+        "max_control_datapath_retries",
+        "--max-control-datapath-retries",
+        retry_limits.get("control_datapath"),
+    )
+    restore(
+        "max_testbench_retries",
+        "--max-testbench-retries",
+        retry_limits.get("testbench"),
+    )
+    restore(
+        "graph_recursion_limit",
+        "--graph-recursion-limit",
+        execution_config.get("graph_recursion_limit"),
+    )
+    restore("lint_timeout", "--lint-timeout", execution_config.get("lint_timeout_seconds"))
+    restore(
+        "max_generated_file_bytes",
+        "--max-generated-file-bytes",
+        execution_config.get("max_generated_file_bytes"),
+    )
+    restore(
+        "max_generated_files",
+        "--max-generated-files",
+        execution_config.get("max_generated_files"),
+    )
+    restore(
+        "max_context_chars",
+        "--max-context-chars",
+        execution_config.get("max_context_chars"),
+    )
+    restore(
+        "max_user_request_chars",
+        "--max-user-request-chars",
+        execution_config.get("max_user_request_chars"),
+    )
+    restore(
+        "max_manager_tasks",
+        "--max-manager-tasks",
+        execution_config.get("max_manager_tasks"),
+    )
+
+    bool_settings = (
+        ("auto_approve", ("--auto-approve", "--no-auto-approve"), "auto_approve"),
+        ("no_testbench", ("--no-testbench", "--testbench"), "skip_testbench"),
+        ("require_lint", ("--require-lint", "--no-require-lint"), "require_lint"),
+        ("run_simulation", ("--run-simulation", "--no-run-simulation"), "run_simulation"),
+        (
+            "allow_blackboxes",
+            ("--allow-blackboxes", "--disallow-blackboxes"),
+            "allow_blackboxes",
+        ),
+        (
+            "fail_on_manager_fallback",
+            "--fail-on-manager-fallback",
+            "fail_on_manager_fallback",
+        ),
+    )
+    for argument_name, option, config_name in bool_settings:
+        if config_name in execution_config:
+            restore(argument_name, option, bool(execution_config.get(config_name)))
+
+    provider_overridden = _command_option_present(argv, "--llm-provider")
+    if not provider_overridden:
+        restore("llm_provider", "--llm-provider", llm_settings.get("provider"))
+        restore("llm_model", "--llm-model", llm_settings.get("model"))
+        restore(
+            "llm_temperature",
+            "--llm-temperature",
+            llm_settings.get("temperature"),
+        )
+        restore("llm_api_url", "--llm-api-url", llm_settings.get("api_url"))
+        restore(
+            "llm_timeout",
+            "--llm-timeout",
+            llm_settings.get("timeout_seconds", execution_config.get("llm_timeout_seconds")),
+        )
+        restore("llm_max_tokens", "--llm-max-tokens", llm_settings.get("max_tokens"))
+    return args
+
+
 DEFAULT_CODE_PROMPT_KEYS = {
     "accepted_rtl_files",
     "candidate_rtl",
@@ -2342,6 +2499,8 @@ def _failed_stage_resume_target(state: AgentState) -> str:
         return "control_datapath_planner"
     if failed_stage.startswith(("coding", "microarchitecture", "verification")):
         return "verilog_coding_team"
+    if failed_stage.startswith("final_lint") and state.get("skip_testbench"):
+        return "final_lint"
     if failed_stage.startswith(("testbench", "final_lint")):
         return "testbench_team"
     if failed_stage == "final_review":
@@ -2634,6 +2793,7 @@ if __name__ == "__main__":
     run_timestamp = datetime.now()
     resumed_state = None
     resume_checkpoint = None
+    previous_execution_config = {}
     if args.continue_run:
         configured_dir = args.artifact_dir or os.getenv("ARTIFACT_DIR")
         if not configured_dir:
@@ -2650,6 +2810,15 @@ if __name__ == "__main__":
             raise SystemExit("This run is complete and has no pending stage to continue.")
         if resume_stage not in CHECKPOINT_STAGES:
             raise SystemExit(f"Checkpoint has unsupported resume stage: {resume_stage!r}")
+        try:
+            previous_execution_config = json.loads(
+                (ARTIFACT_DIR / "execution_config.json").read_text(encoding="utf-8")
+            )
+        except (OSError, json.JSONDecodeError):
+            previous_execution_config = {}
+        if not isinstance(previous_execution_config, dict):
+            previous_execution_config = {}
+        apply_continuation_settings(args, previous_execution_config)
     else:
         user_request_input = args.spec or ""
         if not user_request_input.strip():
@@ -2683,14 +2852,6 @@ if __name__ == "__main__":
     if args.auto_approve:
         os.environ["AUTO_APPROVE_FINAL"] = "true"
 
-    previous_execution_config = {}
-    if args.continue_run:
-        try:
-            previous_execution_config = json.loads(
-                (ARTIFACT_DIR / "execution_config.json").read_text(encoding="utf-8")
-            )
-        except (OSError, json.JSONDecodeError):
-            previous_execution_config = {}
     continuation_history = list(previous_execution_config.get("continuation_history", []))
     if args.continue_run:
         continuation_history.append(

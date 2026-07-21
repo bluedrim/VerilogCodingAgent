@@ -35,7 +35,6 @@ The dashboard watches `output_*` artifact directories and shows:
 - Stage pass/fail/force-forward state.
 - Retry counts and retry limits.
 - Latest reports from architecture, Supervisor, Control/Data Path, coding, microarchitecture, verification, and final lint.
-- Live `main.py` console output, including `print()` messages and tracebacks.
 - Recent files under `logs/`.
 - Files under `failed_attempts/`.
 - Quick preview for any artifact file.
@@ -52,7 +51,11 @@ To continue an interrupted or failed run, select its output directory and click
 `Continue task`. The button is enabled only when a saved checkpoint has pending work
 and no process is already running for that directory. The agent restores the
 Manager plan, current task, review feedback, RTL candidates, accepted files, and
-retry counters, then enters the stage following the last completed node.
+retry counters, then enters the stage following the last completed node. It also
+restores the original LLM model/API URL and execution policies. Dashboard `Default`
+keeps those saved settings; selecting another provider switches to that provider's
+current `.env` configuration. Explicit CLI options on `--continue` override saved
+values.
 
 Select any running or stale project and click `Stop task` to terminate its
 dashboard-launched `main.py` process when present and persist the project status
@@ -156,7 +159,7 @@ LLM_TEMPERATURE=0.1
 Options:
 
 - `--spec`: RTL requirement text or a path to a requirement file.
-- `--continue`: Continue from `<artifact-dir>/run_state_checkpoint.json` instead of starting a new run.
+- `--continue`: Continue from `<artifact-dir>/run_state_checkpoint.json` and restore its saved execution settings. Explicit continuation CLI options override saved values.
 - `--auto-approve`: Skip the final manual approval prompt.
 - `--max-retries`: Maximum retries per coding, microarchitecture review, and verification stage. Defaults to `MAX_RETRIES` or `3`.
 - `--max-manager-retries`: Maximum Manager semantic review/repair attempts. Override with `MAX_MANAGER_RETRIES`.
