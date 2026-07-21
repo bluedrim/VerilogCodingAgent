@@ -52,7 +52,8 @@ STAGES = [
     ("coding", "Coding", "coding_generation", "coding_review_forced_forward", "coding"),
     ("microarchitecture", "Microarchitecture", "microarchitecture_review", "microarchitecture_review_forced_forward", "microarchitecture"),
     ("verification", "Verification", "verification", "verification_review_forced_forward", "verification"),
-    ("final_lint", "Final Lint", "final_lint", "final_lint_forced_forward", "testbench"),
+    ("testbench", "Testbench", "testbench_generation", "", "testbench"),
+    ("final_lint", "Final Lint", "final_lint", "final_lint_forced_forward", ""),
     ("human_approval", "Human Approval", "human_approval", "", ""),
 ]
 
@@ -76,6 +77,49 @@ RETRY_LIMIT_FIELDS = {
     "microarchitecture": ("max_retries",),
     "verification": ("max_retries",),
     "testbench": ("max_testbench_retries",),
+}
+
+PASS_FLAG_FIELDS = {
+    "manager_review": ("manager_review_passed",),
+    "architecture_review": ("architecture_review_passed",),
+    "supervisor_review": ("supervisor_review_passed",),
+    "control_datapath_review": ("control_datapath_review_passed",),
+    "coding_generation": ("generation_ok",),
+    "microarchitecture_review": ("microarchitecture_passed",),
+    "verification": ("verification_passed",),
+    "testbench_generation": (),
+    "final_lint": ("final_lint_passed",),
+    "human_approval": ("human_approved",),
+}
+
+FORCED_FLAG_FIELDS = {
+    "architecture_review_forced_forward": ("architecture_review_forced_forward",),
+    "supervisor_review_forced_forward": ("supervisor_review_forced_forward",),
+    "control_datapath_review_forced_forward": ("control_datapath_review_forced_forward",),
+    "coding_review_forced_forward": ("coding_review_forced_forward",),
+    "microarchitecture_review_forced_forward": ("microarchitecture_review_forced_forward",),
+    "verification_review_forced_forward": ("verification_review_forced_forward",),
+    "final_lint_forced_forward": ("final_lint_forced_forward",),
+}
+
+RESUME_STAGE_TO_PIPELINE_STAGE = {
+    "intake": "manager",
+    "manager": "manager",
+    "architecture": "architecture",
+    "architecture_review": "architecture",
+    "supervisor": "supervisor",
+    "supervisor_review": "supervisor",
+    "control_datapath_planner": "control_datapath",
+    "control_datapath_review": "control_datapath",
+    "verilog_coding_team": "coding",
+    "microarchitecture_reviewer": "microarchitecture",
+    "verification_team": "verification",
+    "supervisor_accept": "verification",
+    "testbench_team": "testbench",
+    "final_lint": "final_lint",
+    "final_review": "human_approval",
+    "writer": "human_approval",
+    "summary": "human_approval",
 }
 
 STAGE_REPORT_FIELDS = {
@@ -523,6 +567,45 @@ def first_stage_int(
     return default
 
 
+def merged_stage_flags(*sources: object) -> dict:
+    merged: dict = {}
+    for source in sources:
+        if isinstance(source, dict):
+            flags = source.get("stage_pass_flags")
+            if isinstance(flags, dict):
+                merged.update(flags)
+    return merged
+
+
+def first_stage_bool(
+    flag_key: str,
+    flags: dict,
+    flat_sources: list[object],
+    flat_fields: tuple[str, ...],
+) -> bool:
+    if flag_key and flag_key in flags:
+        return first_bool(False, flags.get(flag_key))
+    for source in flat_sources:
+        if not isinstance(source, dict):
+            continue
+        for field in flat_fields:
+            if field in source:
+                return first_bool(False, source.get(field))
+    return False
+
+
+def stage_has_files(stage_id: str, checkpoint_state: dict) -> bool:
+    if stage_id == "testbench":
+        return bool(checkpoint_state.get("testbench_files"))
+    if stage_id == "coding":
+        return bool(checkpoint_state.get("candidate_files") or checkpoint_state.get("final_files"))
+    return False
+
+
+def pipeline_stage_for_resume(resume_stage: object) -> str:
+    return RESUME_STAGE_TO_PIPELINE_STAGE.get(str(resume_stage or ""), "")
+
+
 def build_stages(
     snapshot: dict | None,
     summary: dict | None,
@@ -530,6 +613,7 @@ def build_stages(
     checkpoint: dict | None = None,
     execution: dict | None = None,
     job: dict | None = None,
+    active_run: bool = False,
 ) -> list[dict]:
     snapshot = snapshot or {}
     summary = summary or {}
@@ -539,12 +623,7 @@ def build_stages(
     stage_snapshot = nested_dict(summary, "stage_snapshot")
     checkpoint_state = nested_dict(checkpoint, "state")
     job_options = nested_dict(job, "options")
-    flags = (
-        snapshot.get("stage_pass_flags")
-        or stage_snapshot.get("stage_pass_flags")
-        or summary.get("stage_pass_flags")
-        or {}
-    )
+    flags = merged_stage_flags(checkpoint_state, summary, stage_snapshot, snapshot)
     retry_count_maps = [
         snapshot.get("retry_counts"),
         summary.get("retry_counts"),
@@ -560,11 +639,29 @@ def build_stages(
     ]
     retry_count_sources = [snapshot, summary, stage_snapshot, checkpoint_state]
     retry_limit_sources = [snapshot, summary, stage_snapshot, checkpoint_state, execution, job_options]
-    artifact_text = "\n".join(item["path"] for item in artifacts[:120])
+    current_stage = pipeline_stage_for_resume(checkpoint.get("resume_stage"))
+    resumable = bool(checkpoint.get("resume_stage"))
     stages = []
     for stage_id, label, pass_key, forced_key, retry_key in STAGES:
-        passed = bool(flags.get(pass_key))
-        forced = bool(flags.get(forced_key)) if forced_key else False
+        is_resume_stage = bool(current_stage and stage_id == current_stage)
+        passed = first_stage_bool(
+            pass_key,
+            flags,
+            retry_count_sources,
+            PASS_FLAG_FIELDS.get(pass_key, ()),
+        )
+        if not passed and not is_resume_stage and stage_has_files(stage_id, checkpoint_state):
+            passed = True
+        forced = (
+            first_stage_bool(
+                forced_key,
+                flags,
+                retry_count_sources,
+                FORCED_FLAG_FIELDS.get(forced_key, ()),
+            )
+            if forced_key
+            else False
+        )
         count = (
             first_stage_int(
                 retry_key,
@@ -585,15 +682,17 @@ def build_stages(
             if retry_key
             else 0
         )
-        active = stage_id in artifact_text.lower().replace("/", "_")
+        is_current = bool(is_resume_stage and not passed and not forced)
         if passed:
             status, code = "PASS", "pass"
         elif forced:
             status, code = "FORCED", "force"
+        elif is_current and active_run:
+            status, code = "ACTIVE", "active"
+        elif is_current and resumable:
+            status, code = "RESUME", "active"
         elif count > 0:
             status, code = "RETRY/FAIL", "fail"
-        elif active:
-            status, code = "ACTIVE", "active"
         else:
             status, code = "PENDING", "pending"
         stages.append(
@@ -707,7 +806,15 @@ def build_run_summary(root: Path, run_dir: Path) -> dict:
         "last_artifact_age": "",
         "llm": llm,
         "execution": execution,
-        "stages": build_stages(snapshot, summary, artifacts, checkpoint, execution, job),
+        "stages": build_stages(
+            snapshot,
+            summary,
+            artifacts,
+            checkpoint,
+            execution,
+            job,
+            active_run=active,
+        ),
         "last_reports": last_reports,
         "latest_report": infer_latest_report(run_dir, summary, snapshot, failed or artifacts),
         "recent_artifacts": artifacts,

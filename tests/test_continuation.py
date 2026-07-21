@@ -408,6 +408,117 @@ class DashboardContinuationTests(unittest.TestCase):
         self.assertEqual(stages["verification"]["retry_count"], 1)
         self.assertEqual(stages["verification"]["retry_limit"], 10)
 
+    def test_dashboard_pipeline_uses_checkpoint_pass_flags_without_summary(self):
+        with tempfile.TemporaryDirectory(prefix="verilog_dashboard_checkpoint_flags_") as tmp_dir:
+            root = Path(tmp_dir)
+            run_dir = root / "output_counter_20260714_130500"
+            run_dir.mkdir()
+            (run_dir / "run_state_checkpoint.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "phase": "after",
+                        "resume_stage": "verification_team",
+                        "state": {
+                            "manager_review_passed": True,
+                            "architecture_review_passed": True,
+                            "supervisor_review_passed": True,
+                            "control_datapath_review_passed": True,
+                            "generation_ok": True,
+                            "microarchitecture_passed": True,
+                            "verification_passed": False,
+                            "verification_retry_count": 2,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            summary = dashboard.build_run_summary(root, run_dir)
+
+        stages = {stage["id"]: stage for stage in summary["stages"]}
+        self.assertEqual(stages["manager"]["status"], "PASS")
+        self.assertEqual(stages["architecture"]["status"], "PASS")
+        self.assertEqual(stages["supervisor"]["status"], "PASS")
+        self.assertEqual(stages["control_datapath"]["status"], "PASS")
+        self.assertEqual(stages["coding"]["status"], "PASS")
+        self.assertEqual(stages["microarchitecture"]["status"], "PASS")
+        self.assertEqual(stages["verification"]["status"], "RESUME")
+        self.assertEqual(stages["verification"]["retry_count"], 2)
+
+    def test_dashboard_pipeline_separates_testbench_from_final_lint(self):
+        checkpoint = {
+            "resume_stage": "final_lint",
+            "state": {
+                "testbench_files": [{"filename": "tb_counter.v", "content": "module tb; endmodule"}],
+                "testbench_retry_count": 3,
+                "final_lint_passed": False,
+            },
+        }
+        execution = {"retry_limits": {"testbench": 5}}
+
+        stages = {
+            stage["id"]: stage
+            for stage in dashboard.build_stages(
+                {},
+                {},
+                [],
+                checkpoint,
+                execution,
+                {},
+                active_run=True,
+            )
+        }
+
+        self.assertEqual(stages["testbench"]["status"], "PASS")
+        self.assertEqual(stages["testbench"]["retry_count"], 3)
+        self.assertEqual(stages["final_lint"]["status"], "ACTIVE")
+        self.assertEqual(stages["final_lint"]["retry_count"], 0)
+
+    def test_dashboard_pipeline_does_not_pass_current_stage_from_old_files(self):
+        checkpoint = {
+            "resume_stage": "testbench_team",
+            "state": {
+                "testbench_files": [{"filename": "tb_counter.v", "content": "module tb; endmodule"}],
+                "testbench_retry_count": 2,
+                "failed_stage": "testbench",
+            },
+        }
+
+        stages = {
+            stage["id"]: stage
+            for stage in dashboard.build_stages(
+                {},
+                {},
+                [],
+                checkpoint,
+                {},
+                {},
+                active_run=False,
+            )
+        }
+
+        self.assertEqual(stages["testbench"]["status"], "RESUME")
+        self.assertEqual(stages["testbench"]["retry_count"], 2)
+
+    def test_dashboard_pipeline_marks_forced_stage_with_warn_class(self):
+        checkpoint = {
+            "resume_stage": "supervisor",
+            "state": {
+                "architecture_review_forced_forward": True,
+                "architecture_retry_count": 10,
+            },
+        }
+
+        stages = {
+            stage["id"]: stage
+            for stage in dashboard.build_stages({}, {}, [], checkpoint, {}, {})
+        }
+
+        self.assertEqual(stages["architecture"]["status"], "FORCED")
+        self.assertEqual(stages["architecture"]["status_code"], "force")
+        self.assertIn('status === "force"', dashboard.load_dashboard_html())
+
     def test_dashboard_collects_stage_reports_from_checkpoint_state(self):
         with tempfile.TemporaryDirectory(prefix="verilog_dashboard_reports_") as tmp_dir:
             root = Path(tmp_dir)

@@ -490,7 +490,7 @@
 
     function clsStatus(status) {
       if (status === "pass") return "good";
-      if (status === "forced" || status === "running" || status === "stopped") return "warn";
+      if (status === "force" || status === "forced" || status === "running" || status === "stopped") return "warn";
       if (status === "fail") return "bad";
       return "info";
     }
