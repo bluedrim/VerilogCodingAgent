@@ -6,3 +6,4 @@ python-dotenv
 langchain-core
 langchain-ollama
 langchain-openai
+langchain-anthropic

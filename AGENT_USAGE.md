@@ -116,6 +116,31 @@ LLM_TEMPERATURE=0.1
 LLM_MAX_TOKENS=8192
 ```
 
+## Claude run
+
+Use `claude` when you want the agent to call Anthropic Claude models through
+your Anthropic API key. Provide an API key through `ANTHROPIC_API_KEY`,
+`CLAUDE_API_KEY`, `.env`, or `--llm-api-key`.
+
+```bash
+python3 main.py \
+  --llm-provider claude \
+  --llm-model claude-sonnet-4-5-20250929 \
+  --llm-api-key YOUR_ANTHROPIC_API_KEY \
+  --spec spec.txt \
+  --auto-approve
+```
+
+`.env` example:
+
+```bash
+LLM_PROVIDER=claude
+CLAUDE_MODEL=claude-sonnet-4-5-20250929
+ANTHROPIC_API_KEY=YOUR_ANTHROPIC_API_KEY
+LLM_TEMPERATURE=0.1
+LLM_MAX_TOKENS=8192
+```
+
 ## gpt-oss run
 
 The `gpt-oss` option can use Ollama locally or an OpenAI-compatible
@@ -178,13 +203,13 @@ Options:
 - `--max-manager-tasks`: Maximum number of Manager tasks accepted from planning.
 - `--fail-on-manager-fallback`: Fail instead of using the single-task fallback when Manager planning output is invalid.
 - `--artifact-dir`: Directory for generated artifacts and logs.
-- `--llm-provider`: `ollama`, `gpt-oss`, or `openai`.
-- `--llm-model`: Model name such as `gpt-4.1`, `gpt-oss`, `gpt-oss:20b`, `gpt-oss:120b`, or another Ollama model.
+- `--llm-provider`: `ollama`, `gpt-oss`, `openai`, or `claude`.
+- `--llm-model`: Model name such as `gpt-4.1`, `claude-sonnet-4-5-20250929`, `gpt-oss`, `gpt-oss:20b`, `gpt-oss:120b`, or another Ollama model.
 - `--llm-max-tokens`: Maximum output tokens per response. Override with `LLM_MAX_TOKENS`; the default is `8192`.
 - `--run-simulation`: Execute the generated self-checking testbench with `iverilog/vvp`. Disabled by default; enable with `RUN_SIMULATION=true` or `DASHBOARD_RUN_SIMULATION=true` for dashboard runs.
 - `--llm-temperature`: Model temperature.
-- `--llm-api-url`: OpenAI-compatible chat completions URL.
-- `--llm-api-key`: API key for OpenAI or the remote endpoint. The saved config redacts it.
+- `--llm-api-url`: OpenAI-compatible chat completions URL or Anthropic-compatible base URL.
+- `--llm-api-key`: API key for OpenAI, Claude, or the remote endpoint. The saved config redacts it.
 
 LLM provider definitions, CLI argument registration, environment-variable
 resolution, URL normalization, API-key redaction, and backend construction are

@@ -171,6 +171,7 @@ class DashboardContinuationTests(unittest.TestCase):
         self.assertEqual(dashboard.DASHBOARD_HTML_PATH.name, "dashboard.html")
         self.assertNotIn("<!doctype html>", Path(dashboard.__file__).read_text(encoding="utf-8"))
         self.assertIn("Verilog Agent Dashboard", dashboard.load_dashboard_html())
+        self.assertIn('<option value="claude">claude</option>', dashboard.load_dashboard_html())
 
     def test_dashboard_html_has_separate_artifact_and_failed_previews(self):
         html = dashboard.load_dashboard_html()

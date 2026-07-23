@@ -1,10 +1,13 @@
 import argparse
 import os
+import sys
+import types
 import unittest
 from unittest.mock import patch
 
 from verilog_agent.llm_config import (
     add_llm_arguments,
+    create_llm,
     llm_config,
     normalize_chat_completions_url,
     resolve_llm_settings,
@@ -56,6 +59,66 @@ class LlmConfigurationTests(unittest.TestCase):
         self.assertEqual(settings["api_key"], "cli-secret")
         self.assertEqual(settings["timeout_seconds"], 10)
 
+    def test_claude_provider_uses_anthropic_backend(self):
+        with patch.dict(
+            os.environ,
+            {
+                "LLM_PROVIDER": "claude",
+                "CLAUDE_MODEL": "claude-custom-rtl",
+                "ANTHROPIC_API_KEY": "anthropic-secret",
+                "ANTHROPIC_BASE_URL": "https://anthropic-proxy.example/v1",
+                "LLM_MAX_TOKENS": "12000",
+            },
+            clear=True,
+        ):
+            settings = resolve_llm_settings()
+
+        self.assertEqual(settings["provider"], "claude")
+        self.assertEqual(settings["backend"], "anthropic")
+        self.assertEqual(settings["model"], "claude-custom-rtl")
+        self.assertEqual(settings["api_key"], "anthropic-secret")
+        self.assertEqual(settings["base_url"], "https://anthropic-proxy.example/v1")
+        self.assertEqual(settings["max_tokens"], 12000)
+
+    def test_claude_provider_has_default_sonnet_model(self):
+        with patch.dict(
+            os.environ,
+            {
+                "LLM_PROVIDER": "claude",
+                "ANTHROPIC_API_KEY": "anthropic-secret",
+            },
+            clear=True,
+        ):
+            settings = resolve_llm_settings()
+
+        self.assertEqual(settings["model"], "claude-sonnet-4-5-20250929")
+        self.assertEqual(settings["backend"], "anthropic")
+
+    def test_create_llm_builds_chat_anthropic(self):
+        captured = {}
+
+        class FakeChatAnthropic:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        fake_module = types.SimpleNamespace(ChatAnthropic=FakeChatAnthropic)
+        with patch.dict(sys.modules, {"langchain_anthropic": fake_module}):
+            llm = create_llm(
+                provider="claude",
+                model="claude-test-model",
+                api_key="anthropic-secret",
+                api_url="https://anthropic-proxy.example/v1",
+                timeout_seconds=33,
+                max_tokens=4096,
+            )
+
+        self.assertIsInstance(llm, FakeChatAnthropic)
+        self.assertEqual(captured["model"], "claude-test-model")
+        self.assertEqual(captured["api_key"], "anthropic-secret")
+        self.assertEqual(captured["base_url"], "https://anthropic-proxy.example/v1")
+        self.assertEqual(captured["timeout"], 33)
+        self.assertEqual(captured["max_tokens"], 4096)
+
     def test_public_config_redacts_api_key(self):
         with patch.dict(os.environ, {}, clear=True):
             config = llm_config(
@@ -75,7 +138,7 @@ class LlmConfigurationTests(unittest.TestCase):
         args = parser.parse_args(
             [
                 "--llm-provider",
-                "gpt-oss",
+                "claude",
                 "--llm-model",
                 "rtl-model",
                 "--llm-temperature",
@@ -87,7 +150,7 @@ class LlmConfigurationTests(unittest.TestCase):
             ]
         )
 
-        self.assertEqual(args.llm_provider, "gpt-oss")
+        self.assertEqual(args.llm_provider, "claude")
         self.assertEqual(args.llm_model, "rtl-model")
         self.assertEqual(args.llm_temperature, 0.3)
         self.assertEqual(args.llm_timeout, 45)

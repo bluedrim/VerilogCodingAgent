@@ -5,7 +5,7 @@ import os
 import sys
 from typing import Dict
 
-SUPPORTED_LLM_PROVIDERS = ("ollama", "gpt-oss", "openai")
+SUPPORTED_LLM_PROVIDERS = ("ollama", "gpt-oss", "openai", "claude")
 
 
 def bounded_temperature(raw_value: str) -> float:
@@ -19,11 +19,11 @@ def add_llm_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--llm-provider",
         choices=SUPPORTED_LLM_PROVIDERS,
-        help="LLM provider/backend. 'openai' uses OPENAI_API_KEY.",
+        help="LLM provider/backend. 'openai' uses OPENAI_API_KEY; 'claude' uses ANTHROPIC_API_KEY.",
     )
     parser.add_argument(
         "--llm-model",
-        help="LLM model name, for example gpt-oss:20b or gpt-4.1.",
+        help="LLM model name, for example gpt-oss:20b, gpt-4.1, or claude-sonnet-4-5-20250929.",
     )
     parser.add_argument("--llm-temperature", type=bounded_temperature, help="LLM temperature.")
     parser.add_argument(
@@ -85,6 +85,21 @@ def resolve_llm_settings(
     if resolved_provider == "openai":
         resolved_api_url = api_url or os.getenv("OPENAI_API_URL") or os.getenv("LLM_API_URL") or ""
         resolved_api_key = api_key or os.getenv("OPENAI_API_KEY") or os.getenv("LLM_API_KEY") or ""
+    elif resolved_provider == "claude":
+        resolved_api_url = (
+            api_url
+            or os.getenv("ANTHROPIC_API_URL")
+            or os.getenv("ANTHROPIC_BASE_URL")
+            or os.getenv("CLAUDE_API_URL")
+            or ""
+        )
+        resolved_api_key = (
+            api_key
+            or os.getenv("ANTHROPIC_API_KEY")
+            or os.getenv("CLAUDE_API_KEY")
+            or os.getenv("LLM_API_KEY")
+            or ""
+        )
     elif resolved_provider == "gpt-oss":
         resolved_api_url = api_url or os.getenv("GPT_OSS_API_URL") or os.getenv("LLM_API_URL") or ""
         resolved_api_key = api_key or os.getenv("GPT_OSS_API_KEY") or os.getenv("LLM_API_KEY") or ""
@@ -106,12 +121,23 @@ def resolve_llm_settings(
     elif resolved_provider == "openai":
         resolved_model = model or os.getenv("OPENAI_MODEL") or os.getenv("LLM_MODEL") or "gpt-4.1"
         backend = "openai"
+    elif resolved_provider == "claude":
+        resolved_model = (
+            model
+            or os.getenv("CLAUDE_MODEL")
+            or os.getenv("ANTHROPIC_MODEL")
+            or os.getenv("LLM_MODEL")
+            or "claude-sonnet-4-5-20250929"
+        )
+        backend = "anthropic"
     else:
         resolved_model = model or os.getenv("LLM_MODEL") or os.getenv("OLLAMA_MODEL") or "gpt-oss:20b"
         backend = resolved_provider
 
     if backend in {"openai", "openai-compatible"}:
         base_url = normalize_chat_completions_url(resolved_api_url)
+    elif backend == "anthropic":
+        base_url = resolved_api_url.rstrip("/") if resolved_api_url else ""
     elif backend == "ollama":
         base_url = os.getenv("OLLAMA_BASE_URL", "")
     else:
@@ -189,9 +215,31 @@ def create_llm(
             kwargs["base_url"] = str(settings["base_url"])
         return ChatOpenAI(**kwargs)
 
+    if backend == "anthropic":
+        try:
+            from langchain_anthropic import ChatAnthropic
+        except ModuleNotFoundError as exc:
+            print(f"Missing dependency: {exc.name}")
+            print("Install project dependencies with: python3 -m pip install -r requirements.txt")
+            sys.exit(1)
+        if not settings["api_key"]:
+            raise ValueError("Claude provider requires ANTHROPIC_API_KEY, CLAUDE_API_KEY, or --llm-api-key.")
+        kwargs = {
+            "model": model_name,
+            "temperature": resolved_temperature,
+            "api_key": str(settings["api_key"]),
+        }
+        if resolved_timeout > 0:
+            kwargs["timeout"] = resolved_timeout
+        if resolved_max_tokens > 0:
+            kwargs["max_tokens"] = resolved_max_tokens
+        if settings["base_url"]:
+            kwargs["base_url"] = str(settings["base_url"])
+        return ChatAnthropic(**kwargs)
+
     if backend != "ollama":
         raise ValueError(
-            "Unsupported LLM backend. Supported backends: ollama, openai, openai-compatible"
+            "Unsupported LLM backend. Supported backends: ollama, openai, openai-compatible, anthropic"
         )
 
     try:
